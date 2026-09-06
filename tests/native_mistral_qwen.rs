@@ -354,6 +354,21 @@ fn qwen_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty() {
 }
 
 #[test]
+fn mistral_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("mistral-legacy-reentry") {
+        run_mistral_legacy_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer_checked(
+        "mistral-legacy-reentry",
+        "mistral_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty",
+        &[],
+        &["⚠ YOLO MODE · Mistral Vibe"],
+        "MISTRAL_LEGACY_REENTRY_DONE",
+    );
+}
+
+#[test]
 fn mistral_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty() {
     if std::env::var(PTY_CHILD).as_deref() == Ok("mistral-reentry") {
         run_mistral_reentry_pty_child();
@@ -388,6 +403,27 @@ fn shared_restarted_yolo_open_observes_resume_argv_and_warning_for_each_harness_
 }
 
 #[test]
+fn shared_legacy_reentry_uses_safe_resume_without_warning_for_each_harness_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("shared-legacy-reentry") {
+        run_shared_legacy_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer_checked(
+        "shared-legacy-reentry",
+        "shared_legacy_reentry_uses_safe_resume_without_warning_for_each_harness_in_a_real_pty",
+        &[],
+        &[
+            "⚠ YOLO MODE · Oh My Pi",
+            "⚠ YOLO MODE · Grok",
+            "⚠ YOLO MODE · Kilo Code",
+            "⚠ YOLO MODE · OpenHands",
+            "⚠ YOLO MODE · Hermes Agent",
+        ],
+        "SHARED_LEGACY_REENTRY_DONE",
+    );
+}
+
+#[test]
 fn antigravity_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty() {
     if std::env::var(PTY_CHILD).as_deref() == Ok("antigravity-reentry") {
         run_antigravity_reentry_pty_child();
@@ -398,6 +434,21 @@ fn antigravity_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pt
         "antigravity_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty",
         &["⚠ YOLO MODE · Antigravity"],
         "ANTIGRAVITY_REENTRY_DONE",
+    );
+}
+
+#[test]
+fn antigravity_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("antigravity-legacy-reentry") {
+        run_antigravity_legacy_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer_checked(
+        "antigravity-legacy-reentry",
+        "antigravity_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty",
+        &[],
+        &["⚠ YOLO MODE · Antigravity"],
+        "ANTIGRAVITY_LEGACY_REENTRY_DONE",
     );
 }
 
@@ -644,6 +695,14 @@ fn run_qwen_legacy_reentry_pty_child() {
 }
 
 fn run_mistral_reentry_pty_child() {
+    run_mistral_reentry_pty_child_with_security(true);
+}
+
+fn run_mistral_legacy_reentry_pty_child() {
+    run_mistral_reentry_pty_child_with_security(false);
+}
+
+fn run_mistral_reentry_pty_child_with_security(yolo: bool) {
     let directory = private_tempdir();
     let vibe = directory.path().join("vibe");
     let invocations = directory.path().join("invocations.log");
@@ -659,8 +718,9 @@ fn run_mistral_reentry_pty_child() {
     fs::write(
         &state,
         format!(
-            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"YOLO task","yolo":true}}]"#,
-            directory.path().display()
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"task"{}}}]"#,
+            directory.path().display(),
+            if yolo { r#","yolo":true"# } else { "" }
         ),
     )
     .unwrap();
@@ -682,12 +742,31 @@ fn run_mistral_reentry_pty_child() {
         .unwrap();
     assert_eq!(
         fs::read_to_string(invocations).unwrap(),
-        "--auto-approve --resume vibe-yolo\n"
+        if yolo {
+            "--auto-approve --resume vibe-yolo\n"
+        } else {
+            "--resume vibe-yolo\n"
+        }
     );
-    println!("MISTRAL_REENTRY_DONE");
+    println!(
+        "{}",
+        if yolo {
+            "MISTRAL_REENTRY_DONE"
+        } else {
+            "MISTRAL_LEGACY_REENTRY_DONE"
+        }
+    );
 }
 
 fn run_shared_reentry_pty_child() {
+    run_shared_reentry_pty_child_with_security(true);
+}
+
+fn run_shared_legacy_reentry_pty_child() {
+    run_shared_reentry_pty_child_with_security(false);
+}
+
+fn run_shared_reentry_pty_child_with_security(yolo: bool) {
     let directory = private_tempdir();
     let native_executable = directory.path().join("native");
     let invocations = directory.path().join("invocations.log");
@@ -699,35 +778,47 @@ fn run_shared_reentry_pty_child() {
         ),
     );
     let cases = [
-        (Provider::OhMyPi, "session-id", "--yolo --resume session-id"),
+        (
+            Provider::OhMyPi,
+            "session-id",
+            "--yolo --resume session-id",
+            "--resume session-id",
+        ),
         (
             Provider::Grok,
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "--yolo --no-auto-update --resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--no-auto-update --resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         ),
         (
             Provider::KiloCode,
             "session-id",
             "--yolo --session session-id",
+            "--session session-id",
         ),
         (
             Provider::OpenHands,
             "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "--always-approve --resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
         ),
         (
             Provider::Hermes,
             "12345678_123456_abcdef",
             "--yolo chat --cli --resume 12345678_123456_abcdef",
+            "chat --cli --resume 12345678_123456_abcdef",
         ),
     ];
-    for (index, (provider, session_id, expected)) in cases.into_iter().enumerate() {
+    for (index, (provider, session_id, yolo_expected, safe_expected)) in
+        cases.into_iter().enumerate()
+    {
         let state = directory.path().join(format!("owned-{index}.json"));
         fs::write(
             &state,
             format!(
-                r#"[{{"sessionId":"{session_id}","cwd":"{}","createdAtMs":1,"name":"task","yolo":true}}]"#,
-                directory.path().display()
+                r#"[{{"sessionId":"{session_id}","cwd":"{}","createdAtMs":1,"name":"task"{}}}]"#,
+                directory.path().display(),
+                if yolo { r#","yolo":true"# } else { "" }
             ),
         )
         .unwrap();
@@ -753,12 +844,30 @@ fn run_shared_reentry_pty_child() {
             .lines()
             .nth(index)
             .map(str::to_owned);
-        assert_eq!(line.as_deref(), Some(expected));
+        assert_eq!(
+            line.as_deref(),
+            Some(if yolo { yolo_expected } else { safe_expected })
+        );
     }
-    println!("SHARED_REENTRY_DONE");
+    println!(
+        "{}",
+        if yolo {
+            "SHARED_REENTRY_DONE"
+        } else {
+            "SHARED_LEGACY_REENTRY_DONE"
+        }
+    );
 }
 
 fn run_antigravity_reentry_pty_child() {
+    run_antigravity_reentry_pty_child_with_security(true);
+}
+
+fn run_antigravity_legacy_reentry_pty_child() {
+    run_antigravity_reentry_pty_child_with_security(false);
+}
+
+fn run_antigravity_reentry_pty_child_with_security(yolo: bool) {
     let directory = private_tempdir();
     let workspace = directory.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
@@ -775,8 +884,9 @@ fn run_antigravity_reentry_pty_child() {
     fs::write(
         &state,
         format!(
-            r#"[{{"workspace":"{}","conversationId":"owned","createdAtMs":1,"yolo":true}}]"#,
-            workspace.display()
+            r#"[{{"workspace":"{}","conversationId":"owned","createdAtMs":1{}}}]"#,
+            workspace.display(),
+            if yolo { r#","yolo":true"# } else { "" }
         ),
     )
     .unwrap();
@@ -793,9 +903,20 @@ fn run_antigravity_reentry_pty_child() {
         .unwrap();
     assert_eq!(
         fs::read_to_string(invocations).unwrap(),
-        "--dangerously-skip-permissions --conversation owned\n"
+        if yolo {
+            "--dangerously-skip-permissions --conversation owned\n"
+        } else {
+            "--conversation owned\n"
+        }
     );
-    println!("ANTIGRAVITY_REENTRY_DONE");
+    println!(
+        "{}",
+        if yolo {
+            "ANTIGRAVITY_REENTRY_DONE"
+        } else {
+            "ANTIGRAVITY_LEGACY_REENTRY_DONE"
+        }
+    );
 }
 
 fn completed_session(

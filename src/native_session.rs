@@ -240,10 +240,10 @@ pub fn detached_session_keys() -> Vec<String> {
         let Some(registry) = DETACHED.get() else {
             return Vec::new();
         };
-        return registry
+        registry
             .lock()
             .map(|registry| registry.keys().cloned().collect())
-            .unwrap_or_default();
+            .unwrap_or_default()
     }
     #[cfg(not(unix))]
     Vec::new()

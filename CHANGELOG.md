@@ -8,6 +8,24 @@ and future released versions are intended to follow Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Remembered workspace launches now revalidate the selected directory and
+  persist only successful, canonical workspace paths.
+
+### Security
+
+- Antigravity ownership is unique by conversation ID, and ambiguous or
+  failed ownership persistence refuses control rather than claiming a session.
+- Workspace paths containing Unicode control scalars are rejected before they
+  can be persisted or rendered.
+
+### Tests
+
+- Added regressions for Antigravity cross-workspace identity collisions,
+  write failures, workspace revalidation/canonicalization, background launch
+  workspace persistence, Unicode U+009B paths, and safe legacy re-entry.
+
 ## [0.1.53] - 2026-09-04
 
 ### Added

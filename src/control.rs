@@ -675,7 +675,7 @@ impl ClaudeController {
         }
 
         let worker_count = candidates.len().min(MAX_WORKERS);
-        let chunk_size = (candidates.len() + worker_count - 1) / worker_count;
+        let chunk_size = candidates.len().div_ceil(worker_count);
         let batches = std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for chunk in candidates.chunks(chunk_size) {

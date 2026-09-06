@@ -184,7 +184,7 @@ impl AntigravityOwnership {
                     })?;
                 let mut identities = BTreeSet::new();
                 for record in &parsed {
-                    let identity = (&record.workspace, &record.conversation_id);
+                    let identity = &record.conversation_id;
                     if !identities.insert(identity) {
                         bail!("Antigravity ownership registry contains duplicate control identity");
                     }
@@ -229,16 +229,7 @@ impl AntigravityOwnership {
 
     #[cfg(test)]
     fn record(&self, workspace: &Path, conversation_id: &str) -> Result<()> {
-        self.record_named(workspace, conversation_id, None)
-    }
-
-    fn record_named(
-        &self,
-        workspace: &Path,
-        conversation_id: &str,
-        name: Option<&str>,
-    ) -> Result<()> {
-        self.record_named_with_yolo(workspace, conversation_id, name, false)
+        self.record_named_with_yolo(workspace, conversation_id, None, false)
     }
 
     fn record_named_with_yolo(
@@ -248,25 +239,34 @@ impl AntigravityOwnership {
         name: Option<&str>,
         yolo: bool,
     ) -> Result<()> {
-        let previous = self.lookup(workspace, conversation_id);
         let mut records = self
             .records
             .lock()
             .map_err(|_| anyhow!("Antigravity ownership registry lock was poisoned"))?;
-        records.retain(|record| {
+        if records.iter().any(|record| {
+            record.conversation_id == conversation_id && record.workspace != workspace
+        }) {
+            bail!(
+                "Antigravity conversation {conversation_id} is already owned by another workspace"
+            );
+        }
+        let previous = records.iter().find(|record| {
+            record.workspace == workspace && record.conversation_id == conversation_id
+        });
+        let mut next = records.clone();
+        next.retain(|record| {
             record.workspace != workspace || record.conversation_id != conversation_id
         });
-        records.insert(OwnedAntigravityConversation {
+        next.insert(OwnedAntigravityConversation {
             workspace: workspace.to_owned(),
             conversation_id: conversation_id.into(),
             created_at_ms: previous
-                .as_ref()
                 .map(|record| record.created_at_ms)
                 .unwrap_or_else(now_millis),
             yolo,
             name: name
                 .map(str::to_owned)
-                .or_else(|| previous.and_then(|record| record.name)),
+                .or_else(|| previous.and_then(|record| record.name.clone())),
         });
         let parent = self
             .path
@@ -292,10 +292,11 @@ impl AntigravityOwnership {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
-        serde_json::to_writer_pretty(&mut file, &*records)?;
+        serde_json::to_writer_pretty(&mut file, &next)?;
         file.write_all(b"\n")?;
         file.sync_all()?;
         crate::fs_util::replace_file(&temporary, &self.path)?;
+        *records = next;
         Ok(())
     }
 
@@ -922,47 +923,76 @@ impl AntigravityController {
             &exit,
             crate::native_session::NativeSessionExit::Backgrounded
         );
-        let hint = if backgrounded {
-            // Keep the bounded correlator alive after the native UI has been
-            // backgrounded. Antigravity may create its transcript just after
-            // the handoff; the provisional row remains usable in the meantime.
-            conversation_rx.try_recv().ok().and_then(Result::ok)
-        } else {
-            let hint = conversation_rx
-                .recv_timeout(Duration::from_millis(750))
-                .ok()
-                .and_then(Result::ok);
-            cancelled.store(true, Ordering::Release);
-            let _ = monitor.join();
-            ownership.complete(&launch_key);
-            hint
+        let correlation = match conversation_rx
+            .recv_timeout(CONVERSATION_CORRELATION_TIMEOUT + CONVERSATION_CORRELATION_POLL)
+        {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+                "timed out waiting for Antigravity to expose the new conversation"
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+                "Antigravity conversation correlator stopped before ownership was established"
+            )),
         };
-        if matches!(
-            &exit,
-            crate::native_session::NativeSessionExit::Backgrounded
-        ) {
-            if let Some(conversation_id) = hint.as_deref() {
-                crate::native_session::rename_key(
+        cancelled.store(true, Ordering::Release);
+        let _ = monitor.join();
+        let conversation_id = match correlation {
+            Ok(conversation_id) => conversation_id,
+            Err(error) => {
+                return Err(cleanup_failed_antigravity_launch(
+                    ownership,
                     &launch_key,
-                    &format!("antigravity:host:{conversation_id}"),
-                )?;
+                    backgrounded,
+                    error.context("could not correlate the new Antigravity conversation"),
+                ))
+            }
+        };
+        if backgrounded {
+            if let Err(error) = crate::native_session::rename_key(
+                &launch_key,
+                &format!("antigravity:host:{conversation_id}"),
+            ) {
+                return Err(cleanup_failed_antigravity_launch(
+                    ownership,
+                    &launch_key,
+                    true,
+                    error.context("could not reconcile the retained Antigravity frontend"),
+                ));
             }
         }
         match exit {
             crate::native_session::NativeSessionExit::Backgrounded => Ok(ControlOutcome {
                 message: "backgrounded Antigravity session; Enter/Right resumes it".into(),
-                provider_session_hint: Some(hint.unwrap_or(launch_key)),
+                provider_session_hint: Some(conversation_id),
             }),
             crate::native_session::NativeSessionExit::Exited(status) if status.success() => {
                 Ok(ControlOutcome {
                     message: "returned from Antigravity".into(),
-                    provider_session_hint: hint,
+                    provider_session_hint: Some(conversation_id),
                 })
             }
             crate::native_session::NativeSessionExit::Exited(status) => {
                 bail!("Antigravity session exited with status {status}")
             }
         }
+    }
+}
+
+fn cleanup_failed_antigravity_launch(
+    ownership: &AntigravityOwnership,
+    launch_key: &str,
+    backgrounded: bool,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    ownership.complete(launch_key);
+    if !backgrounded {
+        return error;
+    }
+    match crate::native_session::terminate(launch_key) {
+        Ok(()) => error.context("stopped the retained Antigravity frontend"),
+        Err(stop_error) => error.context(format!(
+            "failed to stop the retained Antigravity frontend: {stop_error:#}"
+        )),
     }
 }
 
@@ -1223,10 +1253,6 @@ fn monitor_new_conversation(monitor: AntigravityConversationMonitor) -> thread::
                             .map(|()| current.clone());
                         if result.is_ok() {
                             ownership.complete(&launch_key);
-                            let _ = crate::native_session::rename_key(
-                                &launch_key,
-                                &format!("antigravity:host:{current}"),
-                            );
                         }
                         let _ = sender.send(result);
                         return;
@@ -1240,10 +1266,6 @@ fn monitor_new_conversation(monitor: AntigravityConversationMonitor) -> thread::
                         .map(|()| current);
                     if result.is_ok() {
                         ownership.complete(&launch_key);
-                        let _ = crate::native_session::rename_key(
-                            &launch_key,
-                            &format!("antigravity:host:{}", result.as_ref().unwrap()),
-                        );
                     }
                     let _ = sender.send(result);
                     return;
@@ -1575,7 +1597,7 @@ mod tests {
             &path,
             r#"[
                 {"workspace":"/work","conversationId":"same","createdAtMs":1,"yolo":false},
-                {"workspace":"/work","conversationId":"same","createdAtMs":2,"yolo":true}
+                {"workspace":"/other","conversationId":"same","createdAtMs":2,"yolo":true}
             ]"#,
         )
         .unwrap();
@@ -1587,6 +1609,39 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("duplicate control identity"));
+    }
+
+    #[test]
+    fn ownership_record_rejects_a_conversation_owned_by_another_workspace() {
+        let directory = tempdir().unwrap();
+        let ownership = AntigravityOwnership {
+            path: directory.path().join("sessions.json"),
+            records: Mutex::new(BTreeSet::new()),
+            pending: Mutex::new(BTreeMap::new()),
+        };
+
+        ownership.record(Path::new("/work/one"), "same").unwrap();
+        assert!(ownership.record(Path::new("/work/two"), "same").is_err());
+        assert_eq!(ownership.records().len(), 1);
+        assert!(ownership.owns(Path::new("/work/one"), "same"));
+    }
+
+    #[test]
+    fn ownership_write_failure_does_not_claim_the_conversation_in_memory() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        fs::create_dir(&path).unwrap();
+        let ownership = AntigravityOwnership {
+            path,
+            records: Mutex::new(BTreeSet::new()),
+            pending: Mutex::new(BTreeMap::new()),
+        };
+
+        assert!(ownership
+            .record_named_with_yolo(Path::new("/work"), "conversation", None, true)
+            .is_err());
+        assert!(!ownership.owns(Path::new("/work"), "conversation"));
+        assert!(ownership.records().is_empty());
     }
 
     #[cfg(unix)]
@@ -1886,6 +1941,56 @@ mod tests {
         assert_eq!(sessions[0].summary, "the latest answer");
         assert_eq!(sessions[0].state, SessionState::Completed);
         assert!(sessions[0].updated_at.is_some());
+    }
+
+    #[test]
+    fn launch_monitor_surfaces_ownership_persistence_failure() {
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let cache = directory.path().join("last_conversations.json");
+        fs::write(
+            &cache,
+            serde_json::json!({workspace.display().to_string(): "before"}).to_string(),
+        )
+        .unwrap();
+        let ownership_path = directory.path().join("sessions.json");
+        fs::create_dir(&ownership_path).unwrap();
+        let ownership = Arc::new(AntigravityOwnership {
+            path: ownership_path,
+            records: Mutex::new(BTreeSet::new()),
+            pending: Mutex::new(BTreeMap::new()),
+        });
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let monitor = monitor_new_conversation(AntigravityConversationMonitor {
+            path: cache.clone(),
+            brain_path: directory.path().join("brain"),
+            brain_before: BTreeSet::new(),
+            cwd: workspace.clone(),
+            prompt: "persist failure prompt".into(),
+            task_name: "persist failure".into(),
+            launch_key: "antigravity:new:persist-failure".into(),
+            before: Some("before".into()),
+            yolo: true,
+            ownership: ownership.clone(),
+            cancelled,
+            sender,
+        });
+
+        fs::write(
+            &cache,
+            serde_json::json!({workspace.display().to_string(): "after"}).to_string(),
+        )
+        .unwrap();
+        let error = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap_err();
+        monitor.join().unwrap();
+
+        assert!(!error.to_string().is_empty());
+        assert!(!ownership.owns(&workspace, "after"));
     }
 
     #[test]

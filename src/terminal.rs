@@ -106,6 +106,7 @@ impl MigrationServices {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_dashboard(
     engine: &DiscoveryEngine,
     request: &DiscoveryRequest,
@@ -574,6 +575,15 @@ pub fn run_dashboard(
                                 cwd,
                                 yolo,
                             } => {
+                                let cwd = match workspaces.validate_selection(&cwd) {
+                                    Ok(canonical) => canonical,
+                                    Err(error) => {
+                                        app.set_notice(format!(
+                                            "workspace launch refused: {error:#}"
+                                        ));
+                                        continue;
+                                    }
+                                };
                                 if yolo && !control.supports_yolo(&provider) {
                                     app.set_notice(format!(
                                         "{} does not expose a verified permission-bypass mode; YOLO remains armed",
@@ -889,6 +899,7 @@ fn account_yolo_launch_result(app: &mut App, completed: &LaunchWorkerResult) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     terminal: &mut T,
     app: &mut App,
@@ -901,6 +912,13 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     control: &C,
     workspaces: &WorkspaceRegistry,
 ) -> ActionEffect {
+    let cwd = match workspaces.validate_selection(&cwd) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            app.set_notice(format!("workspace launch refused: {error:#}"));
+            return ActionEffect::default();
+        }
+    };
     let yolo_reservation = if yolo {
         let token = yolo_reservation.unwrap_or(0);
         if yolo_reservation.is_none() {
@@ -1008,9 +1026,7 @@ fn record_successful_workspace_for_control(
 }
 
 fn select_pending_launch(app: &mut App, pending: Option<&PendingLaunch>) -> Option<String> {
-    let Some(pending) = pending else {
-        return None;
-    };
+    let pending = pending?;
     let exact = app.snapshot.sessions.iter().find(|session| {
         session.provider == pending.provider
             && (session.provider_session_id == pending.provider_session_id
@@ -2697,6 +2713,7 @@ mod tests {
     #[derive(Default)]
     struct FakeControl {
         calls: Mutex<Vec<String>>,
+        launch_cwds: Mutex<Vec<PathBuf>>,
         fail_on: Option<&'static str>,
         launch_hint: Option<&'static str>,
     }
@@ -2736,9 +2753,10 @@ mod tests {
             _provider: Provider,
             _model: Option<String>,
             prompt: String,
-            _cwd: std::path::PathBuf,
+            cwd: std::path::PathBuf,
             _yolo: bool,
         ) -> Result<ControlOutcome> {
+            self.launch_cwds.lock().unwrap().push(cwd);
             let mut outcome = self.invoke("launch", prompt)?;
             outcome.provider_session_hint = self.launch_hint.map(str::to_owned);
             Ok(outcome)
@@ -3058,6 +3076,80 @@ mod tests {
     }
 
     #[test]
+    fn foreground_launch_refuses_a_removed_workspace_before_provider_dispatch() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let workspace = state.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let registry = WorkspaceRegistry::load(state.path().join("workspaces.json")).unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        let mut app = app();
+        let mut terminal = FakeTerminal::default();
+        let control = FakeControl::default();
+
+        let effect = dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            Provider::Pi,
+            None,
+            "build".into(),
+            workspace,
+            false,
+            None,
+            &control,
+            &registry,
+        );
+
+        assert!(!effect.refresh);
+        assert!(control.calls.lock().unwrap().is_empty());
+        assert!(terminal.calls.is_empty());
+        assert!(app.notice.as_deref().unwrap().contains("workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_launch_passes_the_revalidated_canonical_workspace_to_provider() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let workspace = state.path().join("workspace");
+        let selected = state.path().join("selected");
+        std::fs::create_dir(&workspace).unwrap();
+        symlink(&workspace, &selected).unwrap();
+        let registry = WorkspaceRegistry::load(state.path().join("workspaces.json")).unwrap();
+        let mut app = app();
+        let mut terminal = FakeTerminal::default();
+        let control = FakeControl::default();
+
+        dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            Provider::Pi,
+            None,
+            "build".into(),
+            selected,
+            false,
+            None,
+            &control,
+            &registry,
+        );
+
+        assert_eq!(
+            *control.launch_cwds.lock().unwrap(),
+            vec![workspace.canonicalize().unwrap()]
+        );
+    }
+
+    #[test]
     fn failed_foreground_launch_keeps_yolo_armed_and_does_not_remember_workspace() {
         let directory = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -3134,6 +3226,48 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("failed to restore dashboard"));
+    }
+
+    #[test]
+    fn successful_background_launch_updates_the_workspace_picker() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let workspace = state.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let registry = WorkspaceRegistry::load(state.path().join("workspaces.json")).unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        schedule_launch_job(
+            LaunchJob {
+                sequence: 8,
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: workspace.clone(),
+                yolo: false,
+                open_when_visible: false,
+                known_session_ids: BTreeSet::new(),
+            },
+            sender,
+            || {
+                Ok(ControlOutcome {
+                    message: "launched".into(),
+                    provider_session_hint: Some("pi-id".into()),
+                })
+            },
+        );
+
+        let completed = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(completed.result.is_ok());
+        let mut app = app();
+        assert!(
+            record_successful_workspace_for_control(&mut app, &registry, &completed.cwd).is_none()
+        );
+        assert_eq!(registry.list()[0].path, workspace.canonicalize().unwrap());
     }
 
     #[test]
@@ -3464,6 +3598,7 @@ mod tests {
             let mut terminal = FakeTerminal::default();
             let control = FakeControl {
                 calls: Mutex::default(),
+                launch_cwds: Mutex::default(),
                 fail_on: Some(operation),
                 launch_hint: None,
             };
@@ -3479,6 +3614,7 @@ mod tests {
         let mut terminal = FakeTerminal::default();
         let control = FakeControl {
             calls: Mutex::default(),
+            launch_cwds: Mutex::default(),
             fail_on: Some("inspect"),
             launch_hint: None,
         };
@@ -3516,6 +3652,7 @@ mod tests {
         let mut terminal = FakeTerminal::default();
         let control = FakeControl {
             calls: Mutex::default(),
+            launch_cwds: Mutex::default(),
             fail_on: Some("open"),
             launch_hint: None,
         };
@@ -3581,6 +3718,7 @@ mod tests {
         let mut terminal = FakeTerminal::default();
         let control = FakeControl {
             calls: Mutex::default(),
+            launch_cwds: Mutex::default(),
             fail_on: Some("delete"),
             launch_hint: None,
         };

@@ -128,10 +128,6 @@ impl MistralVibeOwnership {
         Some(record)
     }
 
-    fn record(&self, session: &VibeSession, fallback_cwd: &Path, name: &str) -> Result<()> {
-        self.record_with_yolo(session, fallback_cwd, name, false)
-    }
-
     fn record_with_yolo(
         &self,
         session: &VibeSession,
@@ -369,7 +365,7 @@ impl SessionSource for MistralVibeSource {
                 normalize_session(session, recorded_cwd.as_deref(), owned, yolo)
             })
             .collect::<Vec<_>>();
-        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        sessions.sort_by_key(|left| std::cmp::Reverse(left.updated_at));
         Ok(sessions)
     }
 }
@@ -1212,7 +1208,7 @@ mod tests {
             },
         );
         ownership
-            .record(&owned, Path::new("/work"), "owned")
+            .record_with_yolo(&owned, Path::new("/work"), "owned", false)
             .unwrap();
         let source = MistralVibeSource::with_rpc(
             Arc::new(FakeRpc {
@@ -1307,7 +1303,7 @@ print(json.dumps({"jsonrpc":"2.0","id":2,"result":{"config":{"models":[{"alias":
         let mut owned = session("owned", VibeStatus::Idle);
         owned.cwd = None;
         ownership
-            .record(&owned, Path::new("/verified/work"), "owned")
+            .record_with_yolo(&owned, Path::new("/verified/work"), "owned", false)
             .unwrap();
         let mut external = session("external", VibeStatus::Idle);
         external.cwd = None;
@@ -1364,7 +1360,7 @@ print(json.dumps({"jsonrpc":"2.0","id":2,"result":{"config":{"models":[{"alias":
         let candidate = session("not-owned", VibeStatus::Idle);
 
         assert!(ownership
-            .record(&candidate, Path::new("/work"), "not owned")
+            .record_with_yolo(&candidate, Path::new("/work"), "not owned", false)
             .is_err());
         assert!(!ownership.owns("not-owned"));
     }

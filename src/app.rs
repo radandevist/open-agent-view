@@ -3391,7 +3391,7 @@ mod tests {
         app.input = "/yolo".into();
         assert_eq!(app.activate(), AppAction::None);
         assert_eq!(app.overlay, Overlay::Confirm(ConfirmTarget::Yolo));
-        assert_eq!(app.yolo, false);
+        assert!(!app.yolo);
 
         assert_eq!(app.activate(), AppAction::None);
         assert!(!app.yolo);

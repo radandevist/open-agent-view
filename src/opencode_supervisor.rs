@@ -872,7 +872,7 @@ fn latest_assistant_summary(value: &Value) -> Option<String> {
                 }
             })
         })
-        .last()
+        .next_back()
 }
 
 fn capitalize(value: &str) -> String {

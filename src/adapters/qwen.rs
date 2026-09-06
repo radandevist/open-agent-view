@@ -164,10 +164,6 @@ impl QwenOwnership {
         records.into_iter().collect()
     }
 
-    fn record(&self, session_id: &str, cwd: &Path, name: &str) -> Result<()> {
-        self.record_with_yolo(session_id, cwd, name, false)
-    }
-
     fn record_with_yolo(&self, session_id: &str, cwd: &Path, name: &str, yolo: bool) -> Result<()> {
         let mut records = self
             .records
@@ -626,10 +622,6 @@ fn qwen_resume_command(executable: &str, session_id: &str, cwd: &Path, yolo: boo
     command
 }
 
-fn run_native(command: Command, key: &str, provider_id: &str) -> Result<ControlOutcome> {
-    run_native_with_security(command, key, provider_id, false)
-}
-
 fn run_native_with_security(
     command: Command,
     key: &str,
@@ -1000,10 +992,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let ownership = QwenOwnership::load(directory.path().join("owned.json")).unwrap();
         ownership
-            .record(
+            .record_with_yolo(
                 "11111111-2222-4333-8444-555555555555",
                 Path::new("/work"),
                 "Parser work",
+                false,
             )
             .unwrap();
         let source = QwenSource::with_runner("qwen", ownership, Arc::new(FakeRunner));
@@ -1056,10 +1049,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let ownership = QwenOwnership::load(directory.path().join("owned.json")).unwrap();
         ownership
-            .record(
+            .record_with_yolo(
                 "11111111-2222-4333-8444-555555555555",
                 Path::new("/work"),
                 "hello",
+                false,
             )
             .unwrap();
         let source = QwenSource::with_runner("qwen", ownership, Arc::new(EmptyRunner));
@@ -1087,10 +1081,11 @@ mod tests {
         let discovery_ownership = QwenOwnership::load(path.clone()).unwrap();
         let control_ownership = QwenOwnership::load(path).unwrap();
         control_ownership
-            .record(
+            .record_with_yolo(
                 "11111111-2222-4333-8444-555555555555",
                 Path::new("/work"),
                 "cross-handle session",
+                false,
             )
             .unwrap();
         let source = QwenSource::with_runner("qwen", discovery_ownership, Arc::new(EmptyRunner));
@@ -1109,10 +1104,11 @@ mod tests {
         let discovery_ownership = QwenOwnership::load(path.clone()).unwrap();
         let control_ownership = QwenOwnership::load(path).unwrap();
         control_ownership
-            .record(
+            .record_with_yolo(
                 "11111111-2222-4333-8444-555555555555",
                 Path::new("/work"),
                 "launch prompt",
+                false,
             )
             .unwrap();
         let source = QwenSource::with_runner("qwen", discovery_ownership, Arc::new(FakeRunner));
@@ -1131,10 +1127,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let ownership = QwenOwnership::load(directory.path().join("owned.json")).unwrap();
         ownership
-            .record(
+            .record_with_yolo(
                 "11111111-2222-4333-8444-555555555555",
                 Path::new("/work"),
                 "hello",
+                false,
             )
             .unwrap();
         let source = QwenSource::with_runner("qwen", ownership, Arc::new(FailingRunner));
@@ -1195,7 +1192,7 @@ mod tests {
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
 
         assert!(ownership
-            .record("not-owned", Path::new("/work"), "not owned")
+            .record_with_yolo("not-owned", Path::new("/work"), "not owned", false)
             .is_err());
         assert!(!ownership.owns("not-owned"));
     }

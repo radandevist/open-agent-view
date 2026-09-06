@@ -133,7 +133,7 @@ impl SessionSource for SessionMigrateNativeSource {
                 &self.executable,
                 &self.data_root,
                 if request.include_external {
-                    request.history_limit.max(1).min(MAX_SESSION_SCAN)
+                    request.history_limit.clamp(1, MAX_SESSION_SCAN)
                 } else {
                     MAX_SESSION_SCAN
                 },
@@ -638,7 +638,7 @@ fn list_sessions(
         }
         _ => bail!("unsupported native harness"),
     };
-    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions.sort_by_key(|left| std::cmp::Reverse(left.updated_at));
     sessions.truncate(limit);
     Ok(sessions)
 }

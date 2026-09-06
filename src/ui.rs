@@ -351,9 +351,11 @@ fn render_session_row(
         truncate(session.provider.label(), provider_width),
         provider_width,
     );
-    let state_prefix = (view_mode == ViewMode::Directory)
-        .then(|| format!("{} · ", short_state(session.state)))
-        .unwrap_or_default();
+    let state_prefix = if view_mode == ViewMode::Directory {
+        format!("{} · ", short_state(session.state))
+    } else {
+        String::new()
+    };
     let age = format_age(session.age(SystemTime::now()));
     let prs = session
         .pull_requests
@@ -517,9 +519,11 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         let line_index = input_line_count(&app.input)
             .saturating_sub(1)
             .min(area.height.saturating_sub(3));
-        let prefix_width = (line_index == 0)
-            .then(|| display_width(prefix))
-            .unwrap_or(0);
+        let prefix_width = if line_index == 0 {
+            display_width(prefix)
+        } else {
+            0
+        };
         let cursor_x = area.x + prefix_width as u16 + display_width(last_line) as u16;
         frame.set_cursor(
             cursor_x.min(area.right().saturating_sub(1)),
@@ -988,7 +992,7 @@ fn render_harness_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.launch_targets.is_empty() {
         return;
     }
-    let popup_width = area.width.saturating_sub(2).min(58).max(28);
+    let popup_width = area.width.saturating_sub(2).clamp(28, 58);
     let desired_height = app.launch_targets.len() as u16 + 3;
     let popup_height = desired_height.min(area.height.saturating_sub(2)).max(5);
     let popup = Rect::new(
@@ -1076,7 +1080,7 @@ fn render_migration_target_picker(frame: &mut Frame<'_>, app: &App, area: Rect) 
     if app.migration_targets.is_empty() {
         return;
     }
-    let popup_width = area.width.saturating_sub(2).min(64).max(30);
+    let popup_width = area.width.saturating_sub(2).clamp(30, 64);
     let visible_rows = MIGRATION_PICKER_PAGE_SIZE
         .min(area.height.saturating_sub(6).max(1) as usize)
         .max(1);
@@ -1150,7 +1154,7 @@ fn render_migration_target_picker(frame: &mut Frame<'_>, app: &App, area: Rect) 
 
 fn render_workspace_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let choices = app.workspace_choices();
-    let popup_width = area.width.saturating_sub(2).min(100).max(32);
+    let popup_width = area.width.saturating_sub(2).clamp(32, 100);
     let desired_height = choices.len() as u16 + 4;
     let popup_height = desired_height.min(area.height.saturating_sub(2)).max(5);
     let popup = Rect::new(
@@ -1223,7 +1227,7 @@ fn render_workspace_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let terminal_shells = app.launch_provider == Provider::Terminal;
     let choices = app.model_choices();
-    let popup_width = area.width.saturating_sub(2).min(76).max(28);
+    let popup_width = area.width.saturating_sub(2).clamp(28, 76);
     let error_lines = if choices.is_empty() && !app.models_loading {
         app.models_error
             .as_deref()

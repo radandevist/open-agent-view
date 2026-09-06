@@ -182,11 +182,11 @@ fn contains_control_bytes(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        return path
-            .as_os_str()
-            .as_bytes()
-            .iter()
-            .any(|byte| *byte < 0x20 || *byte == 0x7f);
+        let bytes = path.as_os_str().as_bytes();
+        bytes.iter().any(|byte| *byte < 0x20 || *byte == 0x7f)
+            || std::str::from_utf8(bytes)
+                .map(|value| value.chars().any(char::is_control))
+                .unwrap_or(false)
     }
     #[cfg(not(unix))]
     path.to_string_lossy().chars().any(char::is_control)
@@ -370,13 +370,10 @@ mod tests {
                 fs::canonicalize(&second).unwrap(),
             ]
         );
-        assert_eq!(
-            fs::metadata(registry.path())
-                .unwrap()
-                .permissions()
-                .readonly(),
-            false
-        );
+        assert!(!fs::metadata(registry.path())
+            .unwrap()
+            .permissions()
+            .readonly());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -440,17 +437,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_existing_workspace_directory_with_control_bytes() {
+    fn rejects_existing_workspace_directory_with_control_scalars() {
         use std::os::unix::ffi::OsStringExt;
 
         let state = tempfile::tempdir().unwrap();
-        let mut name = b"unsafe".to_vec();
-        name.push(b'\n');
-        name.extend_from_slice(b"workspace");
-        let unsafe_path = state.path().join(std::ffi::OsString::from_vec(name));
-        fs::create_dir(&unsafe_path).unwrap();
+        for (index, name) in [b"unsafe\nworkspace".as_slice(), b"unsafe\xc2\x9bworkspace"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut component = index.to_string().into_bytes();
+            component.extend_from_slice(name);
+            let unsafe_path = state.path().join(std::ffi::OsString::from_vec(component));
+            fs::create_dir(&unsafe_path).unwrap();
 
-        assert!(validate_workspace_selection(&unsafe_path).is_err());
+            assert!(validate_workspace_selection(&unsafe_path).is_err());
+        }
     }
 
     #[test]

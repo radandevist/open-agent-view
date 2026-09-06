@@ -16,6 +16,26 @@ visual acceptance criteria, and evidence template live in
 [the real-TTY validation guide](tui-validation.md). This file records completed
 checks; the guide also contains release gates that are not yet complete.
 
+## Unreleased workspace and YOLO safety gate (2026-09-06)
+
+- Deterministic regressions cover Antigravity conversation-ID ownership
+  collisions, ownership write failures, workspace revalidation and canonical
+  launch paths, Unicode U+009B workspace paths, background-launch workspace
+  persistence, and safe legacy re-entry for shared native harnesses, Mistral
+  Vibe, and Antigravity.
+- `cargo +1.75.0 test --locked` passed 446 library tests, 19 CLI tests, all
+  default integration suites, and 27 real-TTY scenarios; the repository's
+  explicitly ignored credential/corpus probes remained ignored.
+- `cargo +1.75.0 build --release --locked`, `cargo test --locked`, and
+  `cargo build --release --locked` passed. The stable locked suite reported
+  533 passed and 9 ignored tests.
+- `cargo fmt --all -- --check` and `git diff --check` passed. The required
+  warning-denied Clippy command was run but remains blocked by pre-existing
+  lint findings outside this packet.
+- No authenticated provider lifecycle or additional real-PTY claim is made by
+  this gate; the legacy re-entry checks use the existing disposable PTY
+  harness.
+
 ## v0.1.53 18-harness parity gate (2026-09-03–04)
 
 - The final feature commit `4fffb203ec8685ebe9d500d3bb5f3bcce85447c3`
