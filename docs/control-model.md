@@ -85,15 +85,17 @@ particular, Pi's project-trust `--approve` option is not treated as a permission
 bypass, and OpenCode's top-level YOLO mode is not claimed because its attach
 client does not accept that flag.
 
-The `--yolo` flag pre-arms only the next task launch; `/yolo` requires an
+The `--yolo` flag pre-arms only the next new task launch; `/yolo` requires an
 explicit confirmation in the composer. There is no global dashboard YOLO
 banner. Unsupported launch targets fail before provider dispatch and leave the
 armed state available. A successful launch consumes it, while a failed launch
 retains it. A provider-native PTY prints the warning on first entry and keeps it
 in the terminal title when first entered or resumed. Persisted ownership records
-carry the per-session marker, with legacy records defaulting to the safe mode.
-Existing sessions retain the policy with which they were created; starting OAV
-with `--yolo` does not retrofit them.
+for shared native harnesses, Qwen Code, Mistral Vibe, and Antigravity carry the
+per-session policy across an OAV restart, including the warning on an owned
+resume. Legacy records without the marker default to the safe mode and do not
+receive bypass flags or warnings. External or unowned sessions are never
+retrofit by starting OAV with `--yolo`.
 
 The new-task composer starts in the canonical current directory. `/workspace`
 opens a searchable picker of full absolute paths from successful launch history;

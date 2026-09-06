@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
-use std::fs::{self, File};
 use std::collections::BTreeSet;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -12,11 +12,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use open_agent_view::adapters::{
-    DiscoveryRequest, MistralVibeController, MistralVibeOwnership, MistralVibeSource,
-    QwenController, QwenOwnership, QwenSource, SessionSource,
+    AntigravityController, AntigravityOwnership, DiscoveryRequest, MistralVibeController,
+    MistralVibeOwnership, MistralVibeSource, QwenController, QwenOwnership, QwenSource,
+    SessionMigrateNativeController, SessionMigrateNativeOwnership, SessionSource,
 };
 use open_agent_view::control::{LaunchRequest, ProviderController};
-use open_agent_view::domain::{AgentSession, Provider, Runtime, SessionKind, SessionSnapshot, SessionState};
+use open_agent_view::domain::{
+    AgentSession, Provider, Runtime, SessionKind, SessionSnapshot, SessionState,
+};
 
 const PTY_CHILD: &str = "OAV_MISTRAL_QWEN_PTY_CHILD";
 
@@ -321,6 +324,83 @@ exit 0
     );
 }
 
+#[test]
+fn qwen_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("qwen-reentry") {
+        run_qwen_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer(
+        "qwen-reentry",
+        "qwen_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty",
+        &["⚠ YOLO MODE · Qwen Code"],
+        "QWEN_REENTRY_DONE",
+    );
+}
+
+#[test]
+fn qwen_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("qwen-legacy-reentry") {
+        run_qwen_legacy_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer_checked(
+        "qwen-legacy-reentry",
+        "qwen_legacy_reentry_uses_safe_resume_without_warning_in_a_real_pty",
+        &[],
+        &["⚠ YOLO MODE · Qwen Code"],
+        "QWEN_LEGACY_REENTRY_DONE",
+    );
+}
+
+#[test]
+fn mistral_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("mistral-reentry") {
+        run_mistral_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer(
+        "mistral-reentry",
+        "mistral_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty",
+        &["⚠ YOLO MODE · Mistral Vibe"],
+        "MISTRAL_REENTRY_DONE",
+    );
+}
+
+#[test]
+fn shared_restarted_yolo_open_observes_resume_argv_and_warning_for_each_harness_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("shared-reentry") {
+        run_shared_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer(
+        "shared-reentry",
+        "shared_restarted_yolo_open_observes_resume_argv_and_warning_for_each_harness_in_a_real_pty",
+        &[
+            "⚠ YOLO MODE · Oh My Pi",
+            "⚠ YOLO MODE · Grok",
+            "⚠ YOLO MODE · Kilo Code",
+            "⚠ YOLO MODE · OpenHands",
+            "⚠ YOLO MODE · Hermes Agent",
+        ],
+        "SHARED_REENTRY_DONE",
+    );
+}
+
+#[test]
+fn antigravity_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty() {
+    if std::env::var(PTY_CHILD).as_deref() == Ok("antigravity-reentry") {
+        run_antigravity_reentry_pty_child();
+        return;
+    }
+    run_reentry_pty_outer(
+        "antigravity-reentry",
+        "antigravity_restarted_yolo_open_observes_resume_argv_and_warning_in_a_real_pty",
+        &["⚠ YOLO MODE · Antigravity"],
+        "ANTIGRAVITY_REENTRY_DONE",
+    );
+}
+
 fn run_mistral_pty_child() {
     let _cleanup = NativeSessionCleanup;
     let directory = private_tempdir();
@@ -483,6 +563,322 @@ exec sleep 60
     controller.interrupt(&session).unwrap();
     controller.open(&session).unwrap();
     println!("QWEN_CONTROLLER_OK");
+}
+
+fn run_qwen_reentry_pty_child() {
+    let directory = private_tempdir();
+    let qwen = directory.path().join("qwen");
+    let invocations = directory.path().join("invocations.log");
+    executable(
+        &qwen,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf QWEN_REENTRY_PROVIDER\n",
+            invocations.display()
+        ),
+    );
+    let id = "11111111-2222-4333-8444-555555555555";
+    let state = directory.path().join("qwen-owned.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"YOLO task","yolo":true}}]"#,
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = QwenOwnership::load(state).unwrap();
+    let controller = QwenController::host(qwen.display().to_string(), ownership);
+    controller
+        .open(&completed_session(
+            &format!("qwen:host:{id}"),
+            id,
+            Provider::QwenCode,
+            directory.path(),
+        ))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(invocations).unwrap(),
+        "--yolo --resume 11111111-2222-4333-8444-555555555555\n"
+    );
+    println!("QWEN_REENTRY_DONE");
+}
+
+fn run_qwen_legacy_reentry_pty_child() {
+    let directory = private_tempdir();
+    let qwen = directory.path().join("qwen");
+    let invocations = directory.path().join("invocations.log");
+    executable(
+        &qwen,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf QWEN_LEGACY_REENTRY_PROVIDER\n",
+            invocations.display()
+        ),
+    );
+    let id = "11111111-2222-4333-8444-555555555555";
+    let state = directory.path().join("qwen-owned.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"Legacy task"}}]"#,
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = QwenOwnership::load(state).unwrap();
+    let controller = QwenController::host(qwen.display().to_string(), ownership);
+    controller
+        .open(&completed_session(
+            &format!("qwen:host:{id}"),
+            id,
+            Provider::QwenCode,
+            directory.path(),
+        ))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(invocations).unwrap(),
+        "--resume 11111111-2222-4333-8444-555555555555\n"
+    );
+    println!("QWEN_LEGACY_REENTRY_DONE");
+}
+
+fn run_mistral_reentry_pty_child() {
+    let directory = private_tempdir();
+    let vibe = directory.path().join("vibe");
+    let invocations = directory.path().join("invocations.log");
+    executable(
+        &vibe,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf MISTRAL_REENTRY_PROVIDER\n",
+            invocations.display()
+        ),
+    );
+    let id = "vibe-yolo";
+    let state = directory.path().join("vibe-owned.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"YOLO task","yolo":true}}]"#,
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = MistralVibeOwnership::load(state).unwrap();
+    let controller = MistralVibeController::host(
+        vibe.display().to_string(),
+        "unused-app-server",
+        ownership,
+        directory.path().to_owned(),
+    );
+    controller
+        .open(&completed_session(
+            &format!("mistral_vibe:host:{id}"),
+            id,
+            Provider::MistralVibe,
+            directory.path(),
+        ))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(invocations).unwrap(),
+        "--auto-approve --resume vibe-yolo\n"
+    );
+    println!("MISTRAL_REENTRY_DONE");
+}
+
+fn run_shared_reentry_pty_child() {
+    let directory = private_tempdir();
+    let native_executable = directory.path().join("native");
+    let invocations = directory.path().join("invocations.log");
+    executable(
+        &native_executable,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf SHARED_REENTRY_PROVIDER\n",
+            invocations.display()
+        ),
+    );
+    let cases = [
+        (Provider::OhMyPi, "session-id", "--yolo --resume session-id"),
+        (
+            Provider::Grok,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--yolo --no-auto-update --resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ),
+        (
+            Provider::KiloCode,
+            "session-id",
+            "--yolo --session session-id",
+        ),
+        (
+            Provider::OpenHands,
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--always-approve --resume aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ),
+        (
+            Provider::Hermes,
+            "12345678_123456_abcdef",
+            "--yolo chat --cli --resume 12345678_123456_abcdef",
+        ),
+    ];
+    for (index, (provider, session_id, expected)) in cases.into_iter().enumerate() {
+        let state = directory.path().join(format!("owned-{index}.json"));
+        fs::write(
+            &state,
+            format!(
+                r#"[{{"sessionId":"{session_id}","cwd":"{}","createdAtMs":1,"name":"task","yolo":true}}]"#,
+                directory.path().display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        let ownership = SessionMigrateNativeOwnership::load(provider.clone(), state).unwrap();
+        let controller = SessionMigrateNativeController::host(
+            provider.clone(),
+            native_executable.display().to_string(),
+            directory.path().to_owned(),
+            ownership,
+        )
+        .unwrap();
+        controller
+            .open(&completed_session(
+                &format!("shared-reentry-{index}"),
+                session_id,
+                provider,
+                directory.path(),
+            ))
+            .unwrap();
+        let line = fs::read_to_string(&invocations)
+            .unwrap()
+            .lines()
+            .nth(index)
+            .map(str::to_owned);
+        assert_eq!(line.as_deref(), Some(expected));
+    }
+    println!("SHARED_REENTRY_DONE");
+}
+
+fn run_antigravity_reentry_pty_child() {
+    let directory = private_tempdir();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let agy = directory.path().join("antigravity");
+    let invocations = directory.path().join("invocations.log");
+    executable(
+        &agy,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > '{}'\nprintf ANTIGRAVITY_REENTRY_PROVIDER\n",
+            invocations.display()
+        ),
+    );
+    let state = directory.path().join("sessions.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"workspace":"{}","conversationId":"owned","createdAtMs":1,"yolo":true}}]"#,
+            workspace.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = AntigravityOwnership::load(state).unwrap();
+    let controller = AntigravityController::managed(agy.display().to_string(), ownership).unwrap();
+    controller
+        .open(&completed_session(
+            "antigravity:host:owned",
+            "owned",
+            Provider::Antigravity,
+            &workspace,
+        ))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(invocations).unwrap(),
+        "--dangerously-skip-permissions --conversation owned\n"
+    );
+    println!("ANTIGRAVITY_REENTRY_DONE");
+}
+
+fn completed_session(
+    id: &str,
+    provider_session_id: &str,
+    provider: Provider,
+    cwd: &Path,
+) -> AgentSession {
+    AgentSession {
+        id: id.into(),
+        provider_session_id: provider_session_id.into(),
+        provider,
+        runtime: Runtime::Host,
+        kind: SessionKind::Managed,
+        name: "YOLO task".into(),
+        cwd: cwd.to_owned(),
+        state: SessionState::Completed,
+        summary: "⚠ YOLO · YOLO task".into(),
+        raw_state: Some("saved; YOLO".into()),
+        pid: None,
+        started_at: None,
+        updated_at: None,
+        pull_requests: None,
+        capabilities: BTreeSet::new(),
+    }
+}
+
+fn run_reentry_pty_outer(provider: &str, test_name: &str, warnings: &[&str], done: &str) {
+    run_reentry_pty_outer_checked(provider, test_name, warnings, &[], done);
+}
+
+fn run_reentry_pty_outer_checked(
+    provider: &str,
+    test_name: &str,
+    warnings: &[&str],
+    forbidden: &[&str],
+    done: &str,
+) {
+    let (mut master, slave) = outer_pty();
+    set_nonblocking(&master);
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test_name, "--nocapture"])
+        .env(PTY_CHILD, provider)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave));
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut output = Vec::new();
+    read_until(
+        &mut master,
+        &mut output,
+        done.as_bytes(),
+        Duration::from_secs(5),
+    );
+    let text = String::from_utf8_lossy(&output);
+    for warning in warnings {
+        assert!(text.contains(warning), "missing {warning:?}: {text}");
+    }
+    for warning in forbidden {
+        assert!(!text.contains(warning), "unexpected {warning:?}: {text}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.child.try_wait().unwrap() {
+            assert!(status.success(), "{text}");
+            child.reaped = true;
+            break;
+        }
+        assert!(Instant::now() < deadline, "re-entry child did not exit");
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn only_live(snapshot: SessionSnapshot) -> open_agent_view::domain::AgentSession {

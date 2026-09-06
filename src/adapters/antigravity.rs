@@ -177,9 +177,20 @@ impl AntigravityOwnership {
         reject_symlink(&path)?;
         reject_insecure_registry_permissions(&path)?;
         let records = match fs::read_to_string(&path) {
-            Ok(input) => serde_json::from_str(&input).with_context(|| {
-                format!("invalid Antigravity ownership registry {}", path.display())
-            })?,
+            Ok(input) => {
+                let parsed: Vec<OwnedAntigravityConversation> = serde_json::from_str(&input)
+                    .with_context(|| {
+                        format!("invalid Antigravity ownership registry {}", path.display())
+                    })?;
+                let mut identities = BTreeSet::new();
+                for record in &parsed {
+                    let identity = (&record.workspace, &record.conversation_id);
+                    if !identities.insert(identity) {
+                        bail!("Antigravity ownership registry contains duplicate control identity");
+                    }
+                }
+                parsed.into_iter().collect()
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
             Err(error) => return Err(error.into()),
         };
@@ -192,27 +203,28 @@ impl AntigravityOwnership {
 
     #[cfg(test)]
     fn owns(&self, workspace: &Path, conversation_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| {
-                records.iter().any(|record| {
-                    record.workspace == workspace && record.conversation_id == conversation_id
-                })
-            })
-            .unwrap_or(false)
+        self.lookup(workspace, conversation_id).is_some()
     }
 
     fn is_yolo(&self, workspace: &Path, conversation_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| {
-                records.iter().any(|record| {
-                    record.workspace == workspace
-                        && record.conversation_id == conversation_id
-                        && record.yolo
-                })
-            })
-            .unwrap_or(false)
+        self.lookup(workspace, conversation_id)
+            .is_some_and(|record| record.yolo)
+    }
+
+    fn lookup(
+        &self,
+        workspace: &Path,
+        conversation_id: &str,
+    ) -> Option<OwnedAntigravityConversation> {
+        let records = self.records.lock().ok()?;
+        let mut matches = records.iter().filter(|record| {
+            record.workspace == workspace && record.conversation_id == conversation_id
+        });
+        let record = matches.next()?.clone();
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(record)
     }
 
     #[cfg(test)]
@@ -236,16 +248,11 @@ impl AntigravityOwnership {
         name: Option<&str>,
         yolo: bool,
     ) -> Result<()> {
+        let previous = self.lookup(workspace, conversation_id);
         let mut records = self
             .records
             .lock()
             .map_err(|_| anyhow!("Antigravity ownership registry lock was poisoned"))?;
-        let previous = records
-            .iter()
-            .find(|record| {
-                record.workspace == workspace && record.conversation_id == conversation_id
-            })
-            .cloned();
         records.retain(|record| {
             record.workspace != workspace || record.conversation_id != conversation_id
         });
@@ -1044,9 +1051,10 @@ impl ProviderController for AntigravityController {
                 }
             };
         }
-        let yolo = self.ownership.as_ref().is_some_and(|ownership| {
-            ownership.is_yolo(&session.cwd, &session.provider_session_id)
-        });
+        let yolo = self
+            .ownership
+            .as_ref()
+            .is_some_and(|ownership| ownership.is_yolo(&session.cwd, &session.provider_session_id));
         let spec = self.invocation.resume_with_security(
             &session.provider_session_id,
             &session.cwd,
@@ -1330,9 +1338,9 @@ fn reject_insecure_registry_permissions(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -1557,6 +1565,28 @@ mod tests {
         let session = owned_antigravity_session(&record, Path::new("/missing"));
         assert!(session.summary.starts_with("⚠ YOLO ·"));
         assert!(session.raw_state.unwrap().contains("YOLO"));
+    }
+
+    #[test]
+    fn ownership_load_rejects_conflicting_duplicate_conversation_identity() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        fs::write(
+            &path,
+            r#"[
+                {"workspace":"/work","conversationId":"same","createdAtMs":1,"yolo":false},
+                {"workspace":"/work","conversationId":"same","createdAtMs":2,"yolo":true}
+            ]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = match AntigravityOwnership::load(path) {
+            Ok(_) => panic!("duplicate conversation identity was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("duplicate control identity"));
     }
 
     #[cfg(unix)]

@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use open_agent_view::domain::{SessionSnapshot, SessionState};
+use open_agent_view::workspaces::WorkspaceRegistry;
 use tempfile::TempDir;
 
 const ESC: &[u8] = b"\x1b";
@@ -167,6 +168,152 @@ fn serialize_real_tty_test() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn configure_fixture_dashboard(command: &mut Command) {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("populated-sessions.json");
+    command.args([
+        "--fixture",
+        fixture.to_str().expect("UTF-8 fixture path"),
+        "--all",
+        "--no-host-providers",
+        "--no-host-hermes",
+        "--include-interactive",
+        "--refresh-ms",
+        "60000",
+    ]);
+}
+
+fn configure_hermes_fixture(command: &mut Command, home: &TempDir, workspace: &Path, yolo: bool) {
+    let root = home.path();
+    fs::create_dir_all(root.join("hermes-home")).unwrap();
+    let executable = root.join("hermes");
+    let arguments = root.join("hermes-arguments");
+    let body = include_str!("../fixtures/sqlite-native-cli.py")
+        .replace(
+            "provider = Path(sys.argv[0]).name",
+            "Path(os.environ[\"OAV_HERMES_ARGS\"]).write_text(\" \".join(sys.argv[1:]) + \"\\n\")\nprovider = \"hermes\"",
+        )
+        .replace(
+            "path = root / (provider + \".db\")",
+            "path = root / \"hermes-home/state.db\"",
+        );
+    fs::write(&executable, body).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    command
+        .env("OAV_TEST_DATABASE_ROOT", root)
+        .env("HERMES_HOME", root.join("hermes-home"))
+        .env("OAV_HERMES_ARGS", arguments)
+        .args([
+            "--cwd",
+            workspace.to_str().expect("UTF-8 Hermes workspace"),
+            "--launch-cwd",
+            workspace.to_str().expect("UTF-8 Hermes workspace"),
+            "--launch-provider",
+            "hermes",
+            "--no-host-claude",
+            "--no-host-codex",
+            "--no-host-pi",
+            "--no-host-opencode",
+            "--no-host-copilot",
+            "--no-host-cursor",
+            "--no-host-antigravity",
+            "--no-host-mistral-vibe",
+            "--no-host-muse",
+            "--no-host-qwen",
+            "--no-host-kimi",
+            "--no-host-omp",
+            "--no-host-grok",
+            "--no-host-kilo",
+            "--no-host-openhands",
+            "--no-host-mastracode",
+            "--no-host-devin",
+            "--refresh-ms",
+            "60000",
+        ])
+        .arg("--hermes-bin")
+        .arg(&executable);
+    if yolo {
+        command.arg("--yolo");
+    }
+}
+
+#[test]
+fn hermes_armed_launch_uses_yolo_chat_cli_and_shows_native_warning() {
+    let _serial = serialize_real_tty_test();
+    let mut app = PtyApp::spawn_configured(110, 30, |command, home| {
+        let workspace = home.path().join("hermes-yolo-workspace");
+        fs::create_dir(&workspace).unwrap();
+        configure_hermes_fixture(command, home, &workspace, true);
+    });
+
+    app.wait_for("Hermes dashboard", |screen| {
+        screen.contains("Open Agent View") && !screen.contains("loading provider sessions")
+    });
+    app.send(b"hermes yolo task");
+    app.wait_for("armed Hermes composer", |screen| {
+        screen.contains("⚠ YOLO") && screen.contains("hermes yolo task")
+    });
+    app.send(ENTER);
+    app.wait_for("Hermes YOLO reply", |screen| {
+        screen.contains("NATIVE hermes reply: hermes yolo task")
+    });
+    assert!(contains_bytes(
+        &app.raw,
+        "⚠ YOLO MODE · Hermes Agent".as_bytes()
+    ));
+    let arguments = fs::read_to_string(app.home_path().join("hermes-arguments")).unwrap();
+    assert!(arguments.starts_with("--yolo chat --cli"), "{arguments}");
+    app.send(SHIFT_LEFT);
+    app.wait_for("Hermes dashboard restore", |screen| {
+        screen.contains("Open Agent View")
+    });
+    app.exit_cleanly();
+}
+
+#[test]
+fn workspace_picker_restores_persisted_state_without_changing_default_directory() {
+    let _serial = serialize_real_tty_test();
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let remembered = home.path().join("remembered-workspace");
+    fs::create_dir(&remembered).unwrap();
+    let registry =
+        WorkspaceRegistry::load(home.path().join("state/open-agent-view/workspaces.json")).unwrap();
+    registry.record_launch_at(&remembered, 42).unwrap();
+
+    let default_cwd = PathBuf::from("/tmp");
+    let mut app = PtyApp::spawn_configured_with_home(110, 30, home, |command, _| {
+        configure_fixture_dashboard(command);
+        command.current_dir(&default_cwd);
+    });
+    app.wait_for("restarted dashboard", |screen| {
+        screen.contains("Open Agent View") && !screen.contains("loading provider sessions")
+    });
+    app.send(b"draft");
+    app.wait_for("restart default workspace", |screen| {
+        screen.contains("workspace /tmp")
+    });
+    app.send(ESC);
+    app.wait_for("dashboard after composer cancellation", |screen| {
+        screen.contains("describe a task")
+    });
+    app.send(b"/workspace");
+    app.send(ENTER);
+    app.wait_for("remembered workspace picker", |screen| {
+        screen.contains("choose workspace") && screen.contains(remembered.to_str().unwrap())
+    });
+    app.send(ENTER);
+    app.wait_for("selected remembered workspace", |screen| {
+        screen.contains(&format!("workspace {}", remembered.display()))
+    });
+    app.send(ESC);
+    app.wait_for("workspace composer close", |screen| {
+        screen.contains("describe a task")
+    });
+    app.exit_cleanly();
+}
+
 struct PtyApp {
     child: Child,
     master: File,
@@ -212,6 +359,20 @@ impl PtyApp {
         rows: u16,
         configure: impl FnOnce(&mut Command, &TempDir),
     ) -> Self {
+        Self::spawn_configured_with_home(
+            columns,
+            rows,
+            tempfile::tempdir().expect("create isolated home"),
+            configure,
+        )
+    }
+
+    fn spawn_configured_with_home(
+        columns: u16,
+        rows: u16,
+        home: TempDir,
+        configure: impl FnOnce(&mut Command, &TempDir),
+    ) -> Self {
         let (master, slave) = open_pty(columns, rows).expect("create PTY");
         let master = unsafe { File::from_raw_fd(master) };
         set_nonblocking(&master).expect("make PTY master nonblocking");
@@ -219,7 +380,6 @@ impl PtyApp {
         let stdin = duplicate_file(slave).expect("duplicate slave for stdin");
         let stdout = duplicate_file(slave).expect("duplicate slave for stdout");
         let stderr = unsafe { File::from_raw_fd(slave) };
-        let home = tempfile::tempdir().expect("create isolated home");
         let mut command = Command::new(env!("CARGO_BIN_EXE_open-agent-view"));
         command
             .env("TERM", "xterm-256color")
@@ -312,7 +472,7 @@ impl PtyApp {
         panic!("timed out waiting for {description}\n--- screen ---\n{screen}");
     }
 
-    fn exit_cleanly(mut self) {
+    fn exit_cleanly(mut self) -> TempDir {
         self.send(ESC);
         let deadline = Instant::now() + Duration::from_secs(4);
         let status = loop {
@@ -340,6 +500,8 @@ impl PtyApp {
             contains_bytes(&self.raw, b"\x1b[?25l") && contains_bytes(&self.raw, b"\x1b[?25h"),
             "dashboard did not restore cursor visibility"
         );
+        let replacement = tempfile::tempdir().expect("replace consumed home");
+        std::mem::replace(&mut self._home, replacement)
     }
 
     fn drain(&mut self) {
@@ -1784,8 +1946,7 @@ while :; do sleep 1; done
     });
     app.send(b"explicit yolo task");
     app.wait_for("composer YOLO pre-arm", |screen| {
-        screen.contains("⚠ YOL")
-            && screen.contains("explicit yolo task")
+        screen.contains("⚠ YOL") && screen.contains("explicit yolo task")
     });
     app.send(ENTER);
     app.wait_for("authenticated Antigravity YOLO model picker", |screen| {
@@ -1813,14 +1974,11 @@ while :; do sleep 1; done
     assert!(!arguments.contains("--sandbox"));
 
     app.send(SHIFT_LEFT);
-    app.wait_for(
-        "dashboard after backgrounding YOLO session",
-        |screen| {
-            screen.contains("Open Agent View")
-                && !screen.contains("⚠ YOLO MODE")
-                && screen.contains("Antigravity native session is backgrounded")
-        },
-    );
+    app.wait_for("dashboard after backgrounding YOLO session", |screen| {
+        screen.contains("Open Agent View")
+            && !screen.contains("⚠ YOLO MODE")
+            && screen.contains("Antigravity native session is backgrounded")
+    });
     app.send(CTRL_X);
     app.wait_for("stop backgrounded Antigravity YOLO session", |screen| {
         screen.contains("stopped native Antigravity session")

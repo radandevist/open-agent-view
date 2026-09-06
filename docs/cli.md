@@ -108,11 +108,13 @@ state remains available for a later supported launch. A successful launch
 consumes the armed state; a failed launch retains it. OAV never guesses at a
 similar-looking flag.
 
-The setting applies only to the next new session created by this OAV process. A
-successful native launch keeps its warning in the native terminal title and
-records a visible YOLO ownership marker where the provider's local ownership
-registry supports it. It does not weaken discovery, adopt external sessions,
-change credentials, or grant OAV additional control over an existing session.
+The setting applies only to the next new session created by this OAV process.
+For shared native harnesses, Qwen Code, Mistral Vibe, and Antigravity, a
+successful owned launch also persists the security mode. After a restart, an
+owned resume restores its provider bypass flag and visible native warning;
+legacy records without the marker resume safely without either. It does not
+weaken discovery, adopt external sessions, change credentials, or grant OAV
+additional control over an existing session.
 
 ### Remembered workspaces
 

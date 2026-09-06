@@ -434,7 +434,11 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             "model"
         };
-        let yolo = if app.yolo { " · ⚠ YOLO · next session only" } else { "" };
+        let yolo = if app.yolo {
+            " · ⚠ YOLO · next session only"
+        } else {
+            ""
+        };
         let workspace = format!(" · workspace {}", app.launch_cwd.display());
         block = block.title(Span::styled(
             format!(
@@ -1437,7 +1441,7 @@ fn render_confirmation(frame: &mut Frame<'_>, _: &App, target: &ConfirmTarget, a
             session_ids.len()
         ),
         ConfirmTarget::Yolo => {
-            "Enable YOLO for the next launched session? y/N\n\nEnter or y arms it; n or escape cancels."
+            "Enable YOLO for the next launched session? y/N\n\nOnly y/Y arms it; Enter, n/N, or escape cancels."
                 .into()
         }
     };
@@ -1737,6 +1741,20 @@ mod tests {
         let picker = buffer_text(terminal.backend().buffer());
         assert!(picker.contains("Pi"));
         assert!(picker.contains("YOLO unavailable"));
+    }
+
+    #[test]
+    fn yolo_confirmation_renderer_requires_explicit_yes() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.overlay = Overlay::Confirm(ConfirmTarget::Yolo);
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+
+        assert!(rendered.contains("Only y/Y arms it; Enter, n/N, or escape cancels."));
+        assert!(!rendered.contains("Enter or y arms it"));
     }
 
     #[test]

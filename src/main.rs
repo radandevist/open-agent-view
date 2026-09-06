@@ -29,13 +29,13 @@ use open_agent_view::maintenance::{
     execute_completed_archive, plan_completed_archive, BulkArchiveReport,
 };
 use open_agent_view::migration::{MigrationClient, MigrationRegistry};
-use open_agent_view::workspaces::WorkspaceRegistry;
 #[cfg(target_os = "linux")]
 use open_agent_view::opencode_supervisor::OpenCodeSupervisor;
 use open_agent_view::pi_supervisor::run_pi_supervisor_daemon;
 #[cfg(target_os = "linux")]
 use open_agent_view::pi_supervisor::PiSupervisor;
 use open_agent_view::terminal::{run_dashboard, MigrationServices};
+use open_agent_view::workspaces::WorkspaceRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum LaunchProvider {

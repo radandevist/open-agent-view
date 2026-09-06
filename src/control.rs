@@ -2702,8 +2702,8 @@ exit 0
                 PathBuf::from("/work"),
                 false,
             )
-                .unwrap_err()
-                .to_string(),
+            .unwrap_err()
+            .to_string(),
             "Pi does not expose model selection"
         );
 

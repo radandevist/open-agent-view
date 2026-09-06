@@ -102,11 +102,20 @@ pub fn validate_workspace_selection(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("workspace must be an absolute path");
     }
+    if contains_control_bytes(path) {
+        bail!("workspace path contains control bytes");
+    }
     let canonical = fs::canonicalize(path)
         .with_context(|| format!("workspace does not exist: {}", path.display()))?;
+    if contains_control_bytes(&canonical) {
+        bail!("workspace path contains control bytes");
+    }
     let metadata = fs::symlink_metadata(&canonical)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        bail!("workspace must be an existing directory: {}", path.display());
+        bail!(
+            "workspace must be an existing directory: {}",
+            path.display()
+        );
     }
     Ok(canonical)
 }
@@ -116,8 +125,9 @@ fn read_registry(path: &Path) -> Result<Vec<WorkspaceRecord>> {
         Ok(_) => ensure_private_file(path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to inspect workspace registry {}", path.display()))
+            return Err(error).with_context(|| {
+                format!("failed to inspect workspace registry {}", path.display())
+            })
         }
     }
     let input = fs::read_to_string(path)
@@ -134,12 +144,21 @@ fn read_registry(path: &Path) -> Result<Vec<WorkspaceRecord>> {
     let mut records = BTreeMap::new();
     for record in document.workspaces {
         let canonical = validate_workspace_selection(&record.path)
-            .with_context(|| format!("invalid workspace {}", record.path.display()))?;
+            .with_context(|| "invalid workspace path in registry")?;
         if canonical != record.path {
-            bail!("workspace registry contains a non-canonical path {}", record.path.display());
+            bail!(
+                "workspace registry contains a non-canonical path {}",
+                record.path.display()
+            );
         }
         if records
-            .insert(record.path.clone(), WorkspaceRecord { path: canonical, ..record })
+            .insert(
+                record.path.clone(),
+                WorkspaceRecord {
+                    path: canonical,
+                    ..record
+                },
+            )
             .is_some()
         {
             bail!("duplicate workspace path in {}", path.display());
@@ -157,6 +176,20 @@ fn sort_records(records: &mut [WorkspaceRecord]) {
             .cmp(&left.last_used_ms)
             .then_with(|| left.path.cmp(&right.path))
     });
+}
+
+fn contains_control_bytes(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return path
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte < 0x20 || *byte == 0x7f);
+    }
+    #[cfg(not(unix))]
+    path.to_string_lossy().chars().any(char::is_control)
 }
 
 fn write_registry(path: &Path, records: &[WorkspaceRecord]) -> Result<()> {
@@ -294,8 +327,7 @@ impl Drop for RegistryLock {
     }
 }
 
-static TEMPORARY_SEQUENCE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static TEMPORARY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -331,11 +363,40 @@ mod tests {
             .into_iter()
             .map(|record| record.path)
             .collect::<Vec<_>>();
-        assert_eq!(paths, vec![
-            fs::canonicalize(&first).unwrap(),
-            fs::canonicalize(&second).unwrap(),
-        ]);
-        assert_eq!(fs::metadata(registry.path()).unwrap().permissions().readonly(), false);
+        assert_eq!(
+            paths,
+            vec![
+                fs::canonicalize(&first).unwrap(),
+                fs::canonicalize(&second).unwrap(),
+            ]
+        );
+        assert_eq!(
+            fs::metadata(registry.path())
+                .unwrap()
+                .permissions()
+                .readonly(),
+            false
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(state.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(registry.path()).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(state.path().join("workspaces.lock"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let restored = WorkspaceRegistry::load(registry.path().to_owned()).unwrap();
         assert_eq!(restored.list().len(), 2);
     }
@@ -353,6 +414,55 @@ mod tests {
 
         let absolute = PathBuf::from("/definitely/not/a/real/workspace");
         assert!(validate_workspace_selection(&absolute).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_unsupported_version_and_duplicate_records() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = state.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let path = state.path().join("workspaces.json");
+        for input in [
+            "not json",
+            r#"{"version":99,"workspaces":[]}"#,
+            r#"{"version":1,"workspaces":[{"path":"PLACEHOLDER","last_used_ms":1},{"path":"PLACEHOLDER","last_used_ms":2}]}"#,
+        ] {
+            let input = input.replace("PLACEHOLDER", &workspace.display().to_string());
+            fs::write(&path, input).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            assert!(WorkspaceRegistry::load(&path).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_existing_workspace_directory_with_control_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let state = tempfile::tempdir().unwrap();
+        let mut name = b"unsafe".to_vec();
+        name.push(b'\n');
+        name.extend_from_slice(b"workspace");
+        let unsafe_path = state.path().join(std::ffi::OsString::from_vec(name));
+        fs::create_dir(&unsafe_path).unwrap();
+
+        assert!(validate_workspace_selection(&unsafe_path).is_err());
+    }
+
+    #[test]
+    fn failed_atomic_replacement_preserves_destination_data() {
+        let state = tempfile::tempdir().unwrap();
+        let destination = state.path().join("workspaces.json");
+        fs::create_dir(&destination).unwrap();
+        let marker = destination.join("safe-data");
+        fs::write(&marker, "preserved").unwrap();
+
+        assert!(write_registry(&destination, &[]).is_err());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "preserved");
     }
 
     #[cfg(unix)]

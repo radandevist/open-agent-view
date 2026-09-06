@@ -430,12 +430,7 @@ pub fn run_with_screen_steps_yolo(
     steps: Vec<(String, Vec<u8>)>,
     provider: &str,
 ) -> Result<NativeSessionExit> {
-    run_with_screen_steps_warning(
-        command,
-        session_key,
-        steps,
-        Some(yolo_warning(provider)),
-    )
+    run_with_screen_steps_warning(command, session_key, steps, Some(yolo_warning(provider)))
 }
 
 fn run_with_screen_steps_warning(

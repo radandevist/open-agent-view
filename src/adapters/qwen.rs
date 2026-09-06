@@ -92,8 +92,19 @@ impl QwenOwnership {
     pub fn load(path: PathBuf) -> Result<Arc<Self>> {
         validate_private_state_path(&path)?;
         let records = match fs::read_to_string(&path) {
-            Ok(input) => serde_json::from_str(&input)
-                .with_context(|| format!("invalid Qwen ownership registry {}", path.display()))?,
+            Ok(input) => {
+                let parsed: Vec<OwnedQwenSession> =
+                    serde_json::from_str(&input).with_context(|| {
+                        format!("invalid Qwen ownership registry {}", path.display())
+                    })?;
+                let mut identities = BTreeSet::new();
+                for record in &parsed {
+                    if !identities.insert(&record.session_id) {
+                        bail!("Qwen ownership registry contains duplicate control identity");
+                    }
+                }
+                parsed.into_iter().collect()
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
             Err(error) => return Err(error.into()),
         };
@@ -104,21 +115,23 @@ impl QwenOwnership {
     }
 
     fn owns(&self, session_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| records.iter().any(|record| record.session_id == session_id))
-            .unwrap_or(false)
+        self.lookup(session_id).is_some()
     }
 
     fn is_yolo(&self, session_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| {
-                records
-                    .iter()
-                    .any(|record| record.session_id == session_id && record.yolo)
-            })
-            .unwrap_or(false)
+        self.lookup(session_id).is_some_and(|record| record.yolo)
+    }
+
+    fn lookup(&self, session_id: &str) -> Option<OwnedQwenSession> {
+        let records = self.records.lock().ok()?;
+        let mut matches = records
+            .iter()
+            .filter(|record| record.session_id == session_id);
+        let record = matches.next()?.clone();
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(record)
     }
 
     fn snapshot(&self) -> Vec<OwnedQwenSession> {
@@ -134,8 +147,17 @@ impl QwenOwnership {
         // Only the already-validated owner-only file may add authority.
         if validate_private_state_path(&self.path).is_ok() {
             if let Ok(input) = fs::read_to_string(&self.path) {
-                if let Ok(persisted) = serde_json::from_str::<BTreeSet<OwnedQwenSession>>(&input) {
-                    records.extend(persisted);
+                if let Ok(persisted) = serde_json::from_str::<Vec<OwnedQwenSession>>(&input) {
+                    let mut identities = BTreeSet::new();
+                    if persisted
+                        .iter()
+                        .all(|record| identities.insert(&record.session_id))
+                    {
+                        for record in persisted {
+                            records.retain(|current| current.session_id != record.session_id);
+                            records.insert(record);
+                        }
+                    }
                 }
             }
         }
@@ -146,13 +168,7 @@ impl QwenOwnership {
         self.record_with_yolo(session_id, cwd, name, false)
     }
 
-    fn record_with_yolo(
-        &self,
-        session_id: &str,
-        cwd: &Path,
-        name: &str,
-        yolo: bool,
-    ) -> Result<()> {
+    fn record_with_yolo(&self, session_id: &str, cwd: &Path, name: &str, yolo: bool) -> Result<()> {
         let mut records = self
             .records
             .lock()
@@ -442,12 +458,7 @@ impl QwenController {
             &session.cwd,
             yolo,
         );
-        run_native_with_security(
-            command,
-            &session.id,
-            &session.provider_session_id,
-            yolo,
-        )
+        run_native_with_security(command, &session.id, &session.provider_session_id, yolo)
     }
 
     fn launch_foreground_with_security(
@@ -469,14 +480,12 @@ impl QwenController {
         // returned successfully or handed an exact live PTY back to OAV. A
         // spawn error or immediate non-zero exit therefore leaves no stale
         // ownership claim.
-        if let Err(error) =
-            self.ownership.record_with_yolo(
-                &session_id,
-                &request.cwd,
-                &summarize(&request.prompt, 48),
-                yolo,
-            )
-        {
+        if let Err(error) = self.ownership.record_with_yolo(
+            &session_id,
+            &request.cwd,
+            &summarize(&request.prompt, 48),
+            yolo,
+        ) {
             if crate::native_session::is_backgrounded(&launch_key) {
                 let _ = crate::native_session::terminate(&launch_key);
             }
@@ -613,9 +622,7 @@ fn qwen_resume_command(executable: &str, session_id: &str, cwd: &Path, yolo: boo
     if yolo {
         command.arg("--yolo");
     }
-    command
-        .args(["--resume", session_id])
-        .current_dir(cwd);
+    command.args(["--resume", session_id]).current_dir(cwd);
     command
 }
 
@@ -964,6 +971,28 @@ mod tests {
             .unwrap();
         assert!(session.summary.starts_with("⚠ YOLO ·"));
         assert!(session.raw_state.unwrap().contains("YOLO"));
+    }
+
+    #[test]
+    fn ownership_load_rejects_conflicting_duplicate_session_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.json");
+        fs::write(
+            &path,
+            r#"[
+                {"sessionId":"same","cwd":"/safe","createdAtMs":1,"name":"safe","yolo":false},
+                {"sessionId":"same","cwd":"/unsafe","createdAtMs":2,"name":"unsafe","yolo":true}
+            ]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = match QwenOwnership::load(path) {
+            Ok(_) => panic!("duplicate session identity was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("duplicate control identity"));
     }
 
     #[test]

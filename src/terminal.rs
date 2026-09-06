@@ -327,13 +327,13 @@ pub fn run_dashboard(
                         match completed.result {
                             Ok(outcome) => {
                                 app.set_notice(if let Some(Some(error)) = workspace_error {
-                                                    format!(
-                                                        "{}; workspace history not saved: {error}",
-                                                        outcome.message
-                                                    )
-                                                } else {
-                                                    outcome.message
-                                                });
+                                    format!(
+                                        "{}; workspace history not saved: {error}",
+                                        outcome.message
+                                    )
+                                } else {
+                                    outcome.message
+                                });
                                 pending_launch =
                                     outcome.provider_session_hint.map(|provider_session_id| {
                                         PendingLaunch {
@@ -594,58 +594,59 @@ pub fn run_dashboard(
                                     None
                                 };
                                 match control.launch_presentation(&provider) {
-                                Ok(LaunchPresentation::Foreground) => {
-                                    app.set_notice(format!(
-                                        "starting {} native session…",
-                                        provider.label()
-                                    ));
-                                    terminal.terminal.draw(|frame| ui::render(frame, &app))?;
-                                    dispatch_foreground_launch(
-                                        &mut terminal,
-                                        &mut app,
-                                        provider,
-                                        model,
-                                        prompt,
-                                        cwd,
-                                        yolo,
-                                        yolo_reservation,
-                                        control,
-                                        &workspaces,
-                                    )
-                                }
-                                Ok(
-                                    presentation @ (LaunchPresentation::Background
-                                    | LaunchPresentation::DeferredForeground),
-                                ) => {
-                                    let known_session_ids = provider_session_ids(&app, &provider);
-                                    launching_provider = Some(provider.clone());
-                                    launch_animation_tick = 0;
-                                    next_launch_animation = Instant::now();
-                                    app.set_notice(format!("launching {}…", provider.label()));
-                                    schedule_launch(
-                                        control.clone(),
-                                        LaunchJob {
-                                            sequence: latest_launch_sequence,
+                                    Ok(LaunchPresentation::Foreground) => {
+                                        app.set_notice(format!(
+                                            "starting {} native session…",
+                                            provider.label()
+                                        ));
+                                        terminal.terminal.draw(|frame| ui::render(frame, &app))?;
+                                        dispatch_foreground_launch(
+                                            &mut terminal,
+                                            &mut app,
                                             provider,
                                             model,
                                             prompt,
                                             cwd,
                                             yolo,
-                                            open_when_visible: presentation
-                                                == LaunchPresentation::DeferredForeground,
-                                            known_session_ids,
-                                        },
-                                        launch_tx.clone(),
-                                    );
-                                    ActionEffect::default()
-                                }
-                                Err(error) => {
-                                    if let Some(token) = yolo_reservation {
-                                        app.finish_yolo_reservation(token, false);
+                                            yolo_reservation,
+                                            control,
+                                            &workspaces,
+                                        )
                                     }
-                                    app.set_notice(format!("launch failed: {error:#}"));
-                                    ActionEffect::default()
-                                }
+                                    Ok(
+                                        presentation @ (LaunchPresentation::Background
+                                        | LaunchPresentation::DeferredForeground),
+                                    ) => {
+                                        let known_session_ids =
+                                            provider_session_ids(&app, &provider);
+                                        launching_provider = Some(provider.clone());
+                                        launch_animation_tick = 0;
+                                        next_launch_animation = Instant::now();
+                                        app.set_notice(format!("launching {}…", provider.label()));
+                                        schedule_launch(
+                                            control.clone(),
+                                            LaunchJob {
+                                                sequence: latest_launch_sequence,
+                                                provider,
+                                                model,
+                                                prompt,
+                                                cwd,
+                                                yolo,
+                                                open_when_visible: presentation
+                                                    == LaunchPresentation::DeferredForeground,
+                                                known_session_ids,
+                                            },
+                                            launch_tx.clone(),
+                                        );
+                                        ActionEffect::default()
+                                    }
+                                    Err(error) => {
+                                        if let Some(token) = yolo_reservation {
+                                            app.finish_yolo_reservation(token, false);
+                                        }
+                                        app.set_notice(format!("launch failed: {error:#}"));
+                                        ActionEffect::default()
+                                    }
                                 }
                             }
                             other => dispatch_action(&mut terminal, &mut app, other, control),
@@ -872,7 +873,7 @@ fn schedule_launch_job(
             sequence: job.sequence,
             provider: job.provider,
             model: job.model,
-                                        prompt: job.prompt,
+            prompt: job.prompt,
             cwd: job.cwd,
             yolo: job.yolo,
             open_when_visible: job.open_when_visible,
@@ -919,27 +920,18 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     }
     let retry_model = model.clone();
     let retry_prompt = prompt.clone();
-    let result = control.launch_foreground_session(
-        provider.clone(),
-        model,
-        prompt,
-        cwd.clone(),
-        yolo,
-    );
+    let result =
+        control.launch_foreground_session(provider.clone(), model, prompt, cwd.clone(), yolo);
     let resume = terminal.resume_dashboard();
     let resume_succeeded = resume.is_ok();
     match result {
         Ok(outcome) => {
-            let workspace_error =
-                record_successful_workspace_for_control(app, workspaces, &cwd);
+            let workspace_error = record_successful_workspace_for_control(app, workspaces, &cwd);
             if let Some(token) = yolo_reservation {
                 app.finish_yolo_reservation(token, true);
             }
             let mut message = if let Some(error) = workspace_error {
-                format!(
-                    "{}; workspace history not saved: {error}",
-                    outcome.message
-                )
+                format!("{}; workspace history not saved: {error}", outcome.message)
             } else {
                 outcome.message
             };
@@ -3137,7 +3129,11 @@ mod tests {
         assert!(!app.yolo);
         assert_eq!(registry.list().len(), 1);
         assert_eq!(app.remembered_workspaces.len(), 1);
-        assert!(app.notice.as_deref().unwrap().contains("failed to restore dashboard"));
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("failed to restore dashboard"));
     }
 
     #[test]

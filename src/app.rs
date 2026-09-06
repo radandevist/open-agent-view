@@ -297,7 +297,11 @@ impl App {
         let needle = self.workspace_filter.to_ascii_lowercase();
         self.remembered_workspaces
             .iter()
-            .filter(|path| path.to_string_lossy().to_ascii_lowercase().contains(&needle))
+            .filter(|path| {
+                path.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+            })
             .cloned()
             .collect()
     }
@@ -1206,7 +1210,10 @@ impl App {
     /// kept as the portable equivalent. Work on Unicode scalar boundaries so
     /// slicing can never split a UTF-8 code point.
     pub fn delete_previous_word(&mut self) {
-        let input = if self.overlay == Overlay::ModelPicker {
+        let workspace_picker = self.overlay == Overlay::WorkspacePicker;
+        let input = if workspace_picker {
+            &mut self.workspace_filter
+        } else if self.overlay == Overlay::ModelPicker {
             &mut self.model_filter
         } else {
             &mut self.input
@@ -1225,7 +1232,11 @@ impl App {
             boundary = index;
         }
         input.truncate(boundary);
-        if self.overlay == Overlay::ModelPicker {
+        if workspace_picker {
+            self.workspace_selection = self
+                .workspace_selection
+                .min(self.workspace_choices().len().saturating_sub(1));
+        } else if self.overlay == Overlay::ModelPicker {
             self.reconcile_model_selection();
         }
     }
@@ -1499,7 +1510,11 @@ impl App {
     }
 
     fn confirm_workspace_selection(&mut self) -> AppAction {
-        let Some(cwd) = self.workspace_choices().get(self.workspace_selection).cloned() else {
+        let Some(cwd) = self
+            .workspace_choices()
+            .get(self.workspace_selection)
+            .cloned()
+        else {
             self.overlay = Overlay::Composer(ComposerMode::NewSession);
             self.workspace_filter.clear();
             self.notice = Some("no remembered workspaces; use /workspace /absolute/path".into());
@@ -3334,9 +3349,12 @@ mod tests {
         assert_eq!(app.overlay, Overlay::WorkspacePicker);
         assert_eq!(app.workspace_choices(), remembered);
         app.move_workspace_selection(1);
-        assert_eq!(app.activate(), AppAction::SelectWorkspace {
-            cwd: PathBuf::from("/work/beta")
-        });
+        assert_eq!(
+            app.activate(),
+            AppAction::SelectWorkspace {
+                cwd: PathBuf::from("/work/beta")
+            }
+        );
         app.set_launch_cwd(PathBuf::from("/work/beta"));
         assert_eq!(app.launch_cwd(), PathBuf::from("/work/beta").as_path());
         assert_eq!(app.input, "finish the task");
@@ -3345,6 +3363,23 @@ mod tests {
         assert_eq!(app.escape(), AppAction::None);
         assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
         assert_eq!(app.input, "finish the task");
+    }
+
+    #[test]
+    fn ctrl_w_edits_workspace_filter_and_reconciles_selection() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.set_remembered_workspaces(vec!["/work/alpha".into(), "/work/beta".into()]);
+        app.start_new_session(None);
+        app.input = "keep this draft".into();
+        app.open_workspace_picker();
+        app.workspace_filter = "alpha beta".into();
+        app.workspace_selection = 1;
+
+        app.delete_previous_word();
+
+        assert_eq!(app.workspace_filter, "alpha ");
+        assert_eq!(app.workspace_selection, 0);
+        assert_eq!(app.input, "keep this draft");
     }
 
     #[test]

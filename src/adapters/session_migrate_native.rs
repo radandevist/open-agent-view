@@ -459,10 +459,7 @@ impl ProviderController for SessionMigrateNativeController {
             .into_iter()
             .find(|record| record.session_id == session.provider_session_id)
             .and_then(|record| record.session_path);
-        let yolo = self
-            .ownership
-            .inner
-            .is_yolo(&session.provider_session_id);
+        let yolo = self.ownership.inner.is_yolo(&session.provider_session_id);
         let mut command = resume_command(
             &self.provider,
             &self.executable,
@@ -1642,7 +1639,9 @@ mod tests {
                 Provider::Hermes => {
                     let yolo = launch_command(&provider, "native-cli", &request, true).unwrap();
                     assert_eq!(
-                        yolo.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                        yolo.get_args()
+                            .map(|arg| arg.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>(),
                         ["--yolo", "chat", "--cli", "--model", "provider/model"]
                     );
                 }
@@ -1678,7 +1677,10 @@ mod tests {
         let session = stored_to_agent(&Provider::Hermes, record, Some(&owned)).unwrap();
 
         assert_eq!(session.summary, "⚠ YOLO · Latest answer");
-        assert_eq!(session.raw_state.as_deref(), Some("saved; YOLO; model=provider/model"));
+        assert_eq!(
+            session.raw_state.as_deref(),
+            Some("saved; YOLO; model=provider/model")
+        );
     }
 
     #[test]
@@ -1830,14 +1832,12 @@ mod tests {
                 updated_at: None,
                 path: None,
             };
-            assert!(stored_to_agent(
-                &session.provider,
-                stored,
-                ownership.inner.records().first(),
-            )
-            .unwrap()
-            .summary
-            .starts_with("⚠ YOLO ·"));
+            assert!(
+                stored_to_agent(&session.provider, stored, ownership.inner.records().first(),)
+                    .unwrap()
+                    .summary
+                    .starts_with("⚠ YOLO ·")
+            );
             assert_eq!(
                 fs::read_to_string(&invocations).unwrap().lines().nth(index),
                 Some(expected_argv.as_str())

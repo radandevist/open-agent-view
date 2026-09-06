@@ -80,9 +80,21 @@ impl MistralVibeOwnership {
     pub fn load(path: PathBuf) -> Result<Arc<Self>> {
         validate_private_state_path(&path)?;
         let records = match fs::read_to_string(&path) {
-            Ok(input) => serde_json::from_str(&input).with_context(|| {
-                format!("invalid Mistral Vibe ownership registry {}", path.display())
-            })?,
+            Ok(input) => {
+                let parsed: Vec<OwnedVibeSession> =
+                    serde_json::from_str(&input).with_context(|| {
+                        format!("invalid Mistral Vibe ownership registry {}", path.display())
+                    })?;
+                let mut identities = BTreeSet::new();
+                for record in &parsed {
+                    if !identities.insert(&record.session_id) {
+                        bail!(
+                            "Mistral Vibe ownership registry contains duplicate control identity"
+                        );
+                    }
+                }
+                parsed.into_iter().collect()
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
             Err(error) => return Err(error.into()),
         };
@@ -93,30 +105,27 @@ impl MistralVibeOwnership {
     }
 
     fn owns(&self, session_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| records.iter().any(|record| record.session_id == session_id))
-            .unwrap_or(false)
+        self.lookup(session_id).is_some()
     }
 
     fn is_yolo(&self, session_id: &str) -> bool {
-        self.records
-            .lock()
-            .map(|records| {
-                records
-                    .iter()
-                    .any(|record| record.session_id == session_id && record.yolo)
-            })
-            .unwrap_or(false)
+        self.lookup(session_id).is_some_and(|record| record.yolo)
     }
 
     fn recorded_cwd(&self, session_id: &str) -> Option<PathBuf> {
-        self.records.lock().ok().and_then(|records| {
-            records
-                .iter()
-                .find(|record| record.session_id == session_id)
-                .map(|record| record.cwd.clone())
-        })
+        self.lookup(session_id).map(|record| record.cwd)
+    }
+
+    fn lookup(&self, session_id: &str) -> Option<OwnedVibeSession> {
+        let records = self.records.lock().ok()?;
+        let mut matches = records
+            .iter()
+            .filter(|record| record.session_id == session_id);
+        let record = matches.next()?.clone();
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(record)
     }
 
     fn record(&self, session: &VibeSession, fallback_cwd: &Path, name: &str) -> Result<()> {
@@ -642,11 +651,12 @@ fn launch_mistral_vibe(
             provider_session_hint: None,
         });
     };
-    if let Err(error) =
-        controller
-            .ownership
-            .record_with_yolo(&session, &request.cwd, &summarize(&request.prompt, 48), yolo)
-    {
+    if let Err(error) = controller.ownership.record_with_yolo(
+        &session,
+        &request.cwd,
+        &summarize(&request.prompt, 48),
+        yolo,
+    ) {
         if matches!(
             native_exit,
             crate::native_session::NativeSessionExit::Backgrounded
@@ -1165,6 +1175,28 @@ mod tests {
             .remove(0);
         assert!(session.summary.starts_with("⚠ YOLO ·"));
         assert!(session.raw_state.unwrap().contains("YOLO"));
+    }
+
+    #[test]
+    fn ownership_load_rejects_conflicting_duplicate_session_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.json");
+        fs::write(
+            &path,
+            r#"[
+                {"sessionId":"same","cwd":"/safe","createdAtMs":1,"name":"safe","yolo":false},
+                {"sessionId":"same","cwd":"/unsafe","createdAtMs":2,"name":"unsafe","yolo":true}
+            ]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = match MistralVibeOwnership::load(path) {
+            Ok(_) => panic!("duplicate session identity was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("duplicate control identity"));
     }
 
     #[test]
