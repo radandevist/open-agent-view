@@ -29,9 +29,9 @@ checks; the guide also contains release gates that are not yet complete.
   default integration suites, and 27 real-TTY scenarios; 9 tests were ignored.
 - `cargo build --release --locked` and `cargo +1.75.0 build --release --locked`
   passed.
-- `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo +1.75.0 clippy --all-targets -- -D warnings`, and `git diff --check`
-  passed.
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings`,
+  `cargo +1.75.0 clippy --all-targets --locked -- -D warnings`, and
+  `git diff --check` passed.
 - No authenticated provider lifecycle or additional real-PTY claim is made by
   this gate; the legacy re-entry checks use the existing disposable PTY
   harness.
