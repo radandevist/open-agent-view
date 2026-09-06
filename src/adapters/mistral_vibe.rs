@@ -455,15 +455,19 @@ impl MistralVibeController {
                 );
             }
         }
-        let mut command = Command::new(&self.executable);
-        command
-            .args(["--resume", &session.provider_session_id])
-            .current_dir(&session.cwd);
-        native_outcome(
-            crate::native_session::run(command, &session.id)?,
+        let yolo = self.ownership.is_yolo(&session.provider_session_id);
+        let command = mistral_vibe_resume_command(
+            &self.executable,
             &session.provider_session_id,
-            &session.name,
-        )
+            &session.cwd,
+            yolo,
+        );
+        let exit = if yolo {
+            crate::native_session::run_yolo(command, &session.id, "Mistral Vibe")?
+        } else {
+            crate::native_session::run(command, &session.id)?
+        };
+        native_outcome(exit, &session.provider_session_id, &session.name)
     }
 }
 
@@ -688,6 +692,20 @@ fn mistral_vibe_launch_command(executable: &str, request: &LaunchRequest, yolo: 
     if let Some(model) = request.model.as_deref() {
         command.env("VIBE_ACTIVE_MODEL", model);
     }
+    command
+}
+
+fn mistral_vibe_resume_command(
+    executable: &str,
+    session_id: &str,
+    cwd: &Path,
+    yolo: bool,
+) -> Command {
+    let mut command = Command::new(executable);
+    if yolo {
+        command.arg("--auto-approve");
+    }
+    command.args(["--resume", session_id]).current_dir(cwd);
     command
 }
 
@@ -1097,6 +1115,21 @@ mod tests {
     }
 
     #[test]
+    fn mistral_vibe_yolo_resume_keeps_the_provider_resume_flag() {
+        let safe = mistral_vibe_resume_command("vibe", "session-id", Path::new("/work"), false);
+        assert_eq!(
+            safe.get_args().collect::<Vec<_>>(),
+            ["--resume", "session-id"]
+        );
+
+        let yolo = mistral_vibe_resume_command("vibe", "session-id", Path::new("/work"), true);
+        assert_eq!(
+            yolo.get_args().collect::<Vec<_>>(),
+            ["--auto-approve", "--resume", "session-id"]
+        );
+    }
+
+    #[test]
     fn mistral_vibe_legacy_state_defaults_safe_and_yolo_survives_restart_with_visible_marker() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owned.json");
@@ -1115,6 +1148,7 @@ mod tests {
             .record_with_yolo(&owned, Path::new("/work"), "owned", true)
             .unwrap();
         let restarted = MistralVibeOwnership::load(path).unwrap();
+        assert!(restarted.is_yolo("vibe-owned"));
         let source = MistralVibeSource::with_rpc(
             Arc::new(FakeRpc {
                 sessions: vec![owned],

@@ -54,11 +54,25 @@ impl AntigravityInvocation {
 
     /// Build Antigravity's documented native conversation-resume command.
     pub fn resume(&self, conversation_id: &str, cwd: &Path) -> Result<AntigravityCommandSpec> {
+        self.resume_with_security(conversation_id, cwd, false)
+    }
+
+    pub fn resume_with_security(
+        &self,
+        conversation_id: &str,
+        cwd: &Path,
+        yolo: bool,
+    ) -> Result<AntigravityCommandSpec> {
         require_conversation_id(conversation_id)?;
         require_absolute_workspace(cwd)?;
+        let mut args = Vec::new();
+        if yolo {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        args.extend(["--conversation".into(), conversation_id.into()]);
         Ok(AntigravityCommandSpec {
             program: self.executable.clone(),
-            args: vec!["--conversation".into(), conversation_id.into()],
+            args,
             current_dir: cwd.to_owned(),
         })
     }
@@ -183,6 +197,19 @@ impl AntigravityOwnership {
             .map(|records| {
                 records.iter().any(|record| {
                     record.workspace == workspace && record.conversation_id == conversation_id
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_yolo(&self, workspace: &Path, conversation_id: &str) -> bool {
+        self.records
+            .lock()
+            .map(|records| {
+                records.iter().any(|record| {
+                    record.workspace == workspace
+                        && record.conversation_id == conversation_id
+                        && record.yolo
                 })
             })
             .unwrap_or(false)
@@ -1017,10 +1044,20 @@ impl ProviderController for AntigravityController {
                 }
             };
         }
-        let spec = self
-            .invocation
-            .resume(&session.provider_session_id, &session.cwd)?;
-        match crate::native_session::run(spec.command(), &session.id)? {
+        let yolo = self.ownership.as_ref().is_some_and(|ownership| {
+            ownership.is_yolo(&session.cwd, &session.provider_session_id)
+        });
+        let spec = self.invocation.resume_with_security(
+            &session.provider_session_id,
+            &session.cwd,
+            yolo,
+        )?;
+        let exit = if yolo {
+            crate::native_session::run_yolo(spec.command(), &session.id, "Antigravity")?
+        } else {
+            crate::native_session::run(spec.command(), &session.id)?
+        };
+        match exit {
             crate::native_session::NativeSessionExit::Backgrounded => Ok(ControlOutcome {
                 message: format!("backgrounded {}; Enter/Right resumes it", session.name),
                 provider_session_hint: Some(session.provider_session_id.clone()),
@@ -1403,6 +1440,17 @@ mod tests {
                 current_dir: "/work/repo".into(),
             }
         );
+        let yolo_resume = invocation
+            .resume_with_security("conversation-id", Path::new("/work/repo"), true)
+            .unwrap();
+        assert_eq!(
+            yolo_resume.args,
+            vec![
+                "--dangerously-skip-permissions",
+                "--conversation",
+                "conversation-id"
+            ]
+        );
         let launch = invocation
             .sandboxed_launch(Path::new("/work/repo"), "fix tests", Some("gemini-3-pro"))
             .unwrap();
@@ -1500,6 +1548,7 @@ mod tests {
             .record_named_with_yolo(Path::new("/work"), "owned", Some("Parser"), true)
             .unwrap();
         let restarted = AntigravityOwnership::load(path).unwrap();
+        assert!(restarted.is_yolo(Path::new("/work"), "owned"));
         let record = restarted
             .records()
             .into_iter()
@@ -1508,6 +1557,70 @@ mod tests {
         let session = owned_antigravity_session(&record, Path::new("/missing"));
         assert!(session.summary.starts_with("⚠ YOLO ·"));
         assert!(session.raw_state.unwrap().contains("YOLO"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restarted_yolo_open_keeps_conversation_resume_argv_and_security_mode() {
+        let directory = tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let executable = directory.path().join("agy");
+        let invocations = directory.path().join("invocations.log");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                invocations.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let state = directory.path().join("sessions.json");
+        fs::write(
+            &state,
+            format!(
+                r#"[{{"workspace":"{}","conversationId":"owned","createdAtMs":1,"yolo":true}}]"#,
+                workspace.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+        let ownership = AntigravityOwnership::load(state).unwrap();
+        let controller = AntigravityController {
+            invocation: AntigravityInvocation::host(executable.display().to_string()),
+            ownership: Some(ownership),
+            cache_path: directory.path().join("last.json"),
+            brain_path: directory.path().join("brain"),
+            model_cache_path: directory.path().join("models.json"),
+            model_cache: Mutex::new(None),
+            runner: Arc::new(ProcessRunner),
+        };
+        let session = AgentSession {
+            id: "antigravity:host:owned".into(),
+            provider_session_id: "owned".into(),
+            provider: Provider::Antigravity,
+            runtime: Runtime::Host,
+            kind: SessionKind::Managed,
+            name: "YOLO task".into(),
+            cwd: workspace,
+            state: SessionState::Completed,
+            summary: "⚠ YOLO · YOLO task".into(),
+            raw_state: Some("owned_conversation; YOLO".into()),
+            pid: None,
+            started_at: None,
+            updated_at: None,
+            pull_requests: None,
+            capabilities: BTreeSet::new(),
+        };
+
+        controller.open(&session).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(invocations).unwrap(),
+            "--dangerously-skip-permissions --conversation owned\n"
+        );
     }
 
     #[cfg(unix)]

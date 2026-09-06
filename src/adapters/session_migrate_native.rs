@@ -459,13 +459,17 @@ impl ProviderController for SessionMigrateNativeController {
             .into_iter()
             .find(|record| record.session_id == session.provider_session_id)
             .and_then(|record| record.session_path);
+        let yolo = self
+            .ownership
+            .inner
+            .is_yolo(&session.provider_session_id);
         let mut command = resume_command(
             &self.provider,
             &self.executable,
             &session.cwd,
             &session.provider_session_id,
             resume_path.as_deref(),
-            self.ownership.inner.is_yolo(&session.provider_session_id),
+            yolo,
         )?;
         if self.provider == Provider::MastraCode {
             command.env(
@@ -491,7 +495,11 @@ impl ProviderController for SessionMigrateNativeController {
             );
         }
         native_outcome(
-            crate::native_session::run(command, &session.id)?,
+            if yolo {
+                crate::native_session::run_yolo(command, &session.id, self.provider.label())?
+            } else {
+                crate::native_session::run(command, &session.id)?
+            },
             &self.provider,
             &session.provider_session_id,
         )
@@ -1725,6 +1733,114 @@ mod tests {
                     .collect::<Vec<_>>(),
                 expected,
                 "{provider:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restarted_yolo_shared_reentry_preserves_resume_argv_and_marker() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let invocations = directory.path().join("invocations.log");
+        let executable = directory.path().join("native");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                invocations.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cases = [
+            (
+                Provider::OhMyPi,
+                "session-id",
+                "--yolo --resume session-id".to_owned(),
+            ),
+            (
+                Provider::Grok,
+                UUID,
+                format!("--yolo --no-auto-update --resume {UUID}"),
+            ),
+            (
+                Provider::KiloCode,
+                "session-id",
+                "--yolo --session session-id".to_owned(),
+            ),
+            (
+                Provider::OpenHands,
+                UUID,
+                format!("--always-approve --resume {UUID}"),
+            ),
+            (
+                Provider::Hermes,
+                "12345678_123456_abcdef",
+                "--yolo chat --cli --resume 12345678_123456_abcdef".to_owned(),
+            ),
+        ];
+        for (index, (provider, session_id, expected_argv)) in cases.into_iter().enumerate() {
+            let state = directory.path().join(format!("owned-{index}.json"));
+            fs::write(
+                &state,
+                format!(
+                    r#"[{{"sessionId":"{session_id}","cwd":"{}","createdAtMs":1,"name":"task","yolo":true}}]"#,
+                    directory.path().display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+            let ownership = SessionMigrateNativeOwnership::load(provider.clone(), state).unwrap();
+            let controller = SessionMigrateNativeController::host(
+                provider.clone(),
+                executable.display().to_string(),
+                directory.path().to_owned(),
+                ownership.clone(),
+            )
+            .unwrap();
+            let session = AgentSession {
+                id: format!("shared-reentry-{index}"),
+                provider_session_id: session_id.into(),
+                provider,
+                runtime: Runtime::Host,
+                kind: SessionKind::Managed,
+                name: "task".into(),
+                cwd: directory.path().to_owned(),
+                state: SessionState::Completed,
+                summary: "⚠ YOLO · task".into(),
+                raw_state: Some("saved; YOLO".into()),
+                pid: None,
+                started_at: None,
+                updated_at: None,
+                pull_requests: None,
+                capabilities: BTreeSet::new(),
+            };
+
+            controller.open(&session).unwrap();
+            let stored = StoredSession {
+                session_id: session_id.into(),
+                cwd: directory.path().to_owned(),
+                name: "task".into(),
+                summary: "latest".into(),
+                model: None,
+                created_at: None,
+                updated_at: None,
+                path: None,
+            };
+            assert!(stored_to_agent(
+                &session.provider,
+                stored,
+                ownership.inner.records().first(),
+            )
+            .unwrap()
+            .summary
+            .starts_with("⚠ YOLO ·"));
+            assert_eq!(
+                fs::read_to_string(&invocations).unwrap().lines().nth(index),
+                Some(expected_argv.as_str())
             );
         }
     }

@@ -110,6 +110,17 @@ impl QwenOwnership {
             .unwrap_or(false)
     }
 
+    fn is_yolo(&self, session_id: &str) -> bool {
+        self.records
+            .lock()
+            .map(|records| {
+                records
+                    .iter()
+                    .any(|record| record.session_id == session_id && record.yolo)
+            })
+            .unwrap_or(false)
+    }
+
     fn snapshot(&self) -> Vec<OwnedQwenSession> {
         let mut records = self
             .records
@@ -424,11 +435,19 @@ impl QwenController {
         if crate::native_session::is_backgrounded(&session.id) {
             return resume_native(&session.id, &session.provider_session_id, &session.name);
         }
-        let mut command = Command::new(&self.executable);
-        command
-            .args(["--resume", &session.provider_session_id])
-            .current_dir(&session.cwd);
-        run_native(command, &session.id, &session.provider_session_id)
+        let yolo = self.ownership.is_yolo(&session.provider_session_id);
+        let command = qwen_resume_command(
+            &self.executable,
+            &session.provider_session_id,
+            &session.cwd,
+            yolo,
+        );
+        run_native_with_security(
+            command,
+            &session.id,
+            &session.provider_session_id,
+            yolo,
+        )
     }
 
     fn launch_foreground_with_security(
@@ -586,6 +605,17 @@ fn qwen_launch_command(
     command
         .args(["--prompt-interactive", request.prompt.trim()])
         .current_dir(&request.cwd);
+    command
+}
+
+fn qwen_resume_command(executable: &str, session_id: &str, cwd: &Path, yolo: bool) -> Command {
+    let mut command = Command::new(executable);
+    if yolo {
+        command.arg("--yolo");
+    }
+    command
+        .args(["--resume", session_id])
+        .current_dir(cwd);
     command
 }
 
@@ -887,6 +917,21 @@ mod tests {
     }
 
     #[test]
+    fn qwen_yolo_resume_keeps_the_provider_resume_flag() {
+        let safe = qwen_resume_command("qwen", "session-id", Path::new("/work"), false);
+        assert_eq!(
+            safe.get_args().collect::<Vec<_>>(),
+            ["--resume", "session-id"]
+        );
+
+        let yolo = qwen_resume_command("qwen", "session-id", Path::new("/work"), true);
+        assert_eq!(
+            yolo.get_args().collect::<Vec<_>>(),
+            ["--yolo", "--resume", "session-id"]
+        );
+    }
+
+    #[test]
     fn qwen_legacy_state_defaults_safe_and_yolo_survives_restart_with_visible_marker() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("owned.json");
@@ -909,6 +954,7 @@ mod tests {
             )
             .unwrap();
         let restarted = QwenOwnership::load(path).unwrap();
+        assert!(restarted.is_yolo("11111111-2222-4333-8444-555555555555"));
         let source = QwenSource::with_runner("qwen", restarted, Arc::new(FakeRunner));
         let session = source
             .discover(&DiscoveryRequest::default())

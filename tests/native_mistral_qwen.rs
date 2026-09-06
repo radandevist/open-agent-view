@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::fs::{self, File};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
@@ -15,7 +16,7 @@ use open_agent_view::adapters::{
     QwenController, QwenOwnership, QwenSource, SessionSource,
 };
 use open_agent_view::control::{LaunchRequest, ProviderController};
-use open_agent_view::domain::{Provider, Runtime, SessionSnapshot, SessionState};
+use open_agent_view::domain::{AgentSession, Provider, Runtime, SessionKind, SessionSnapshot, SessionState};
 
 const PTY_CHILD: &str = "OAV_MISTRAL_QWEN_PTY_CHILD";
 
@@ -126,6 +127,58 @@ printf 'launch %s %s %s\n' "$session" "$model" "$prompt" >> "$root/invocations.l
 }
 
 #[test]
+fn qwen_restarted_yolo_open_keeps_resume_argv_and_security_mode() {
+    let directory = private_tempdir();
+    let qwen = directory.path().join("qwen");
+    executable(
+        &qwen,
+        r##"#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+printf '%s\n' "$*" >> "$root/invocations.log"
+exit 0
+"##,
+    );
+    let id = "11111111-2222-4333-8444-555555555555";
+    let state = directory.path().join("qwen-owned.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"YOLO task","yolo":true}}]"#,
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = QwenOwnership::load(state).unwrap();
+    let controller = QwenController::host(qwen.display().to_string(), ownership);
+    let session = AgentSession {
+        id: format!("qwen:host:{id}"),
+        provider_session_id: id.into(),
+        provider: Provider::QwenCode,
+        runtime: Runtime::Host,
+        kind: SessionKind::Managed,
+        name: "YOLO task".into(),
+        cwd: directory.path().to_owned(),
+        state: SessionState::Completed,
+        summary: "⚠ YOLO · YOLO task".into(),
+        raw_state: Some("saved; YOLO".into()),
+        pid: None,
+        started_at: None,
+        updated_at: None,
+        pull_requests: None,
+        capabilities: BTreeSet::new(),
+    };
+
+    controller.open(&session).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("invocations.log")).unwrap(),
+        "--yolo --resume 11111111-2222-4333-8444-555555555555\n"
+    );
+}
+
+#[test]
 fn mistral_public_controller_correlates_exact_launch_then_discovers_and_opens_it() {
     let directory = private_tempdir();
     let vibe = directory.path().join("vibe");
@@ -209,6 +262,63 @@ esac
     external.id = "mistral_vibe:host:external".into();
     assert!(controller.open(&external).is_err());
     assert!(controller.interrupt(&external).is_err());
+}
+
+#[test]
+fn mistral_restarted_yolo_open_keeps_resume_argv_and_security_mode() {
+    let directory = private_tempdir();
+    let vibe = directory.path().join("vibe");
+    executable(
+        &vibe,
+        r##"#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+printf '%s\n' "$*" >> "$root/invocations.log"
+exit 0
+"##,
+    );
+    let id = "vibe-yolo";
+    let state = directory.path().join("vibe-owned.json");
+    fs::write(
+        &state,
+        format!(
+            r#"[{{"sessionId":"{id}","cwd":"{}","createdAtMs":1,"name":"YOLO task","yolo":true}}]"#,
+            directory.path().display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o600)).unwrap();
+    let ownership = MistralVibeOwnership::load(state).unwrap();
+    let controller = MistralVibeController::host(
+        vibe.display().to_string(),
+        "unused-app-server",
+        ownership,
+        directory.path().to_owned(),
+    );
+    let session = AgentSession {
+        id: format!("mistral_vibe:host:{id}"),
+        provider_session_id: id.into(),
+        provider: Provider::MistralVibe,
+        runtime: Runtime::Host,
+        kind: SessionKind::Managed,
+        name: "YOLO task".into(),
+        cwd: directory.path().to_owned(),
+        state: SessionState::Completed,
+        summary: "⚠ YOLO · YOLO task".into(),
+        raw_state: Some("idle; YOLO".into()),
+        pid: None,
+        started_at: None,
+        updated_at: None,
+        pull_requests: None,
+        capabilities: BTreeSet::new(),
+    };
+
+    controller.open(&session).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("invocations.log")).unwrap(),
+        "--auto-approve --resume vibe-yolo\n"
+    );
 }
 
 fn run_mistral_pty_child() {
