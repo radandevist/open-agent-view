@@ -46,8 +46,10 @@ just the startup banner. MastraCode must acknowledge `/new` before receiving
 the task; its empty startup thread is excluded from launch correlation.
 This automation requires Unix PTYs (Linux/macOS). Windows can inspect their
 saved sessions; automated TUI launch for these two is not advertised there.
-Devin uses ordinary argv for launch/resume. None of these three advertises OAV
-YOLO support without a dedicated permission-behavior verification gate.
+Devin uses ordinary argv for launch/resume. Hermes' verified `--yolo` launch
+setting is supported by OAV and is retained in its private ownership marker;
+MastraCode and Devin remain unsupported because no verified bypass equivalent is
+claimed for them.
 
 ## Storage and safety
 

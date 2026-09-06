@@ -279,12 +279,13 @@ impl KimiController {
                     .collect())
             },
         )?;
-        self.ownership.inner.record(
+        self.ownership.inner.record_with_yolo(
             &entry.session_id,
             &request.cwd,
             &request.prompt,
             Some(&entry.session_dir),
             "Kimi Code",
+            yolo,
         )?;
         if matches!(exit, crate::native_session::NativeSessionExit::Backgrounded) {
             crate::native_session::rename_key(
@@ -377,8 +378,13 @@ impl ProviderController for KimiController {
         let spec = self
             .invocation
             .resume(&session.cwd, &session.provider_session_id)?;
+        let yolo = self.ownership.inner.is_yolo(&session.provider_session_id);
         native_outcome(
-            crate::native_session::run(spec.command(), &session.id)?,
+            if yolo {
+                crate::native_session::run_yolo(spec.command(), &session.id, "Kimi Code")?
+            } else {
+                crate::native_session::run(spec.command(), &session.id)?
+            },
             &session.provider_session_id,
         )
     }
@@ -542,6 +548,11 @@ fn kimi_session(
         .last_prompt
         .map(|value| sanitize(&value, 180, &name))
         .unwrap_or_else(|| name.clone());
+    let summary = if owned.is_some_and(|record| record.yolo) {
+        format!("⚠ YOLO · {summary}")
+    } else {
+        summary
+    };
     let created_at = timestamp(state.created_at.as_ref())
         .or_else(|| owned.map(|record| UNIX_EPOCH + Duration::from_millis(record.created_at_ms)));
     let cwd = state
@@ -567,14 +578,18 @@ fn kimi_session(
             SessionState::Completed
         },
         summary,
-        raw_state: Some(
-            if backgrounded {
+        raw_state: Some({
+            let lifecycle = if backgrounded {
                 "backgrounded"
             } else {
                 state.last_turn_reason.as_deref().unwrap_or("saved")
+            };
+            if owned.is_some_and(|record| record.yolo) {
+                format!("{lifecycle}; YOLO")
+            } else {
+                lifecycle.into()
             }
-            .into(),
-        ),
+        }),
         pid: None,
         started_at: created_at,
         updated_at: timestamp(state.updated_at.as_ref())

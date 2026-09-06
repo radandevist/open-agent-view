@@ -33,7 +33,7 @@ Open Agent View is already up to date.
 | Option | Meaning |
 | --- | --- |
 | `--json` | Print a normalized snapshot and do not enter the TUI. |
-| `--yolo` | **Dangerous, explicit opt-in.** Launch new sessions with a verified provider-native permission-bypass mode. Unsupported harnesses fail closed. Existing sessions are not changed. |
+| `--yolo` | **Dangerous, explicit opt-in.** Pre-arm one new session for a verified provider-native permission-bypass mode. Unsupported harnesses fail closed. Existing sessions are not changed. |
 | `--all` | Compatibility flag that explicitly includes completed sessions; completed is already the default. |
 | `--hide-completed` / `--active-only` | Hide completed sessions at startup. `/completed show` restores them without restarting. |
 | `--include-interactive` | Include provider sessions reported as foreground/interactive. |
@@ -63,8 +63,8 @@ Open Agent View is already up to date.
 | `--docker-container NAME_OR_ID` | Observe Claude and Codex in one explicitly selected running container; repeatable. |
 | `--docker-bin PATH` | Use a particular Docker executable; default `docker`. |
 | `--session-migrate-bin PATH` | Use a particular session-migrate executable for `ctrl+m`; default `session-migrate`. |
-| `--harness` / `--launch-provider claude\|codex\|pi\|omp\|opencode\|cursor\|copilot\|antigravity\|mistral-vibe\|muse\|qwen\|kimi\|grok\|kilo\|openhands\|terminal` | Initial harness for new-session prompts; default Claude. Each configured coding harness opens its native full-screen UI; Terminal opens the user's shell. `oh-my-pi` and `kilo-code` are accepted aliases. |
-| `--launch-cwd PATH` | Working directory for newly launched host sessions; default current directory. |
+| `--harness` / `--launch-provider claude\|codex\|pi\|omp\|opencode\|cursor\|copilot\|antigravity\|mistral-vibe\|muse\|qwen\|kimi\|grok\|kilo\|openhands\|hermes\|mastracode\|devin\|terminal` | Initial harness for new-session prompts; default Claude. Each configured coding harness opens its native full-screen UI; Terminal opens the user's shell. `oh-my-pi` and `kilo-code` are accepted aliases. |
+| `--launch-cwd PATH` | Existing absolute working directory for newly launched host sessions; default is the canonical current directory. |
 | `--refresh-ms N` | Refresh interval, at least 250 ms; default 15000 ms. Refresh runs off the input thread, and first-launch results appear provider by provider. Use `ctrl+l` for an immediate refresh. |
 
 The `--managed-docker-registry PATH` global option applies to the managed
@@ -73,11 +73,11 @@ snapshot rather than hiding healthy sessions from another adapter.
 
 ### Explicit YOLO mode
 
-`oav --yolo` is deliberately off by default. While it is active, the dashboard,
-new-task composer, and every native session launched in that mode display a
-persistent warning. Returning to or resuming the native screen does not clear
-the warning. Stop OAV and restart without `--yolo` to return new launches to
-their normal security settings.
+`oav --yolo` is deliberately off by default. With the flag, the new-task
+composer starts pre-armed for one launch. The dashboard itself has no global
+YOLO mode; the composer and harness picker identify the armed launch. In the
+composer, `/yolo` opens an explicit confirmation before arming the same
+one-session state. Escape or `n` cancels without arming it.
 
 OAV enables the mode only where the installed harness exposes a verified native
 equivalent:
@@ -96,18 +96,32 @@ equivalent:
 | Grok | `--yolo` |
 | Kilo Code | `--yolo` |
 | OpenHands | `--always-approve` |
+| Hermes Agent | `--yolo` |
 
-Pi, OpenCode, GitHub Copilot, and Terminal are intentionally unsupported.
+Pi, OpenCode, GitHub Copilot, MastraCode, Devin, and Terminal are intentionally unsupported.
 Pi's `--approve` only trusts a project; it is not a permission bypass. OAV's
 managed OpenCode path starts a server and attaches a client, and the attach
 command does not accept OpenCode's top-level YOLO flag. No equivalent is claimed
 for Copilot or a shell. Selecting any unsupported harness while `--yolo` is
-active returns an error before a provider process is launched. OAV never guesses
-at a similar-looking flag.
+active returns an error before a provider process is launched, and the armed
+state remains available for a later supported launch. A successful launch
+consumes the armed state; a failed launch retains it. OAV never guesses at a
+similar-looking flag.
 
-The setting applies only to new sessions created by this OAV process. It does
-not weaken discovery, adopt external sessions, change credentials, or grant OAV
-additional control over an existing session.
+The setting applies only to the next new session created by this OAV process. A
+successful native launch keeps its warning in the native terminal title and
+records a visible YOLO ownership marker where the provider's local ownership
+registry supports it. It does not weaken discovery, adopt external sessions,
+change credentials, or grant OAV additional control over an existing session.
+
+### Remembered workspaces
+
+The composer starts with the canonical current directory, or the directory
+given by `--launch-cwd`. Type `/workspace` to search a picker of full absolute
+paths remembered from successful launches, or type `/workspace /absolute/path`
+to select a path directly. Paths are validated as existing directories before
+launch. The private registry is updated only after a provider launch succeeds;
+failed launches do not create workspace history.
 
 Bare provider command defaults are resolved from `PATH` first, then from the
 provider's conventional user-local install directories. This includes
@@ -434,6 +448,8 @@ label.
 | Harness picker | `enter` or `1`–`9` | Select the highlighted or numbered harness and return to the unchanged draft; changing harness resets the model to its default. |
 | Harness picker | `esc` | Return to the unchanged draft without switching harnesses. |
 | New-task composer | `/harness` / `/harness NAME` | Open the picker or directly select any configured harness when its launch controller is available; `/provider` is an alias. |
+| New-task composer | `/workspace` / `/workspace PATH` | Search full remembered absolute paths, or select an exact existing absolute path for the next launch. Successful launches update the private history. |
+| New-task composer | `/yolo` | Confirm or cancel the one-next-session permission-bypass launch. A failed launch leaves it armed; a successful launch consumes it. |
 | New-task composer | `/model` | Asynchronously load the selected harness's account/catalog model list and open a searchable picker. |
 | Terminal composer | `/shell` / `/shell NAME` | Open the shell picker or select an installed shell; `/model` remains an exact alias while Terminal is selected. Missing supported shells appear as explicit native package-manager install actions. |
 | Model picker | type, `backspace`, `↑` / `↓`, `tab` / `shift+tab`, `page up` / `page down` | Filter and navigate catalog results; provider discovery stays off the input thread. |

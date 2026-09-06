@@ -419,6 +419,31 @@ pub fn run_with_screen_steps(
     session_key: &str,
     steps: Vec<(String, Vec<u8>)>,
 ) -> Result<NativeSessionExit> {
+    run_with_screen_steps_warning(command, session_key, steps, None)
+}
+
+/// Drive screen-gated provider input while retaining the explicit YOLO warning
+/// throughout the native foreground handoff.
+pub fn run_with_screen_steps_yolo(
+    command: Command,
+    session_key: &str,
+    steps: Vec<(String, Vec<u8>)>,
+    provider: &str,
+) -> Result<NativeSessionExit> {
+    run_with_screen_steps_warning(
+        command,
+        session_key,
+        steps,
+        Some(yolo_warning(provider)),
+    )
+}
+
+fn run_with_screen_steps_warning(
+    command: Command,
+    session_key: &str,
+    steps: Vec<(String, Vec<u8>)>,
+    warning: Option<String>,
+) -> Result<NativeSessionExit> {
     validate_session_key(session_key)?;
     if steps.is_empty()
         || steps.len() > 8
@@ -448,7 +473,7 @@ pub fn run_with_screen_steps(
                 ready_marker,
                 next: steps,
             }),
-            None,
+            warning,
         )
     }
     #[cfg(not(unix))]

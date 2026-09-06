@@ -61,10 +61,6 @@ pub struct ControlHubConfig {
     pub launch_provider: Provider,
     pub launch_cwd: PathBuf,
     pub provider_io_enabled: bool,
-    /// Explicitly opt newly launched sessions into the provider's verified
-    /// permission-bypass mode. Providers without an exact native equivalent
-    /// reject launch instead of guessing.
-    pub yolo: bool,
 }
 
 /// Provider-specific lifecycle operations registered with the shared dashboard.
@@ -193,7 +189,6 @@ pub struct ControlHub {
     launch_provider: Provider,
     launch_cwd: PathBuf,
     provider_io_enabled: bool,
-    yolo: bool,
     migration_registry: Option<MigrationRegistry>,
 }
 
@@ -246,7 +241,6 @@ impl ControlHub {
             launch_provider: config.launch_provider,
             launch_cwd: config.launch_cwd,
             provider_io_enabled: config.provider_io_enabled,
-            yolo: config.yolo,
             migration_registry: None,
         })
     }
@@ -313,10 +307,6 @@ impl ControlHub {
 
     pub fn default_launch_provider(&self) -> Provider {
         self.launch_provider.clone()
-    }
-
-    pub fn yolo_enabled(&self) -> bool {
-        self.yolo
     }
 
     pub fn yolo_supported_providers(&self) -> BTreeSet<Provider> {
@@ -437,7 +427,13 @@ impl ControlHub {
     }
 
     pub fn launch(&self, prompt: String) -> Result<ControlOutcome> {
-        self.launch_with(self.launch_provider.clone(), None, prompt)
+        self.launch_with(
+            self.launch_provider.clone(),
+            None,
+            prompt,
+            self.launch_cwd.clone(),
+            false,
+        )
     }
 
     pub fn launch_with(
@@ -445,13 +441,15 @@ impl ControlHub {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome> {
         self.ensure_provider_io()?;
         let controller = self.controller(&provider)?;
         let model = validate_model(model)?;
-        if self.yolo && !controller.supports_yolo() {
+        if yolo && !controller.supports_yolo() {
             bail!(
-                "{} does not expose a verified permission-bypass mode; restart without --yolo",
+                "{} does not expose a verified permission-bypass mode; YOLO remains armed",
                 provider.label()
             );
         }
@@ -468,9 +466,9 @@ impl ControlHub {
             provider,
             model,
             prompt,
-            cwd: self.launch_cwd.clone(),
+            cwd,
         };
-        if self.yolo {
+        if yolo {
             controller.launch_yolo(&request)
         } else {
             controller.launch(&request)
@@ -482,13 +480,15 @@ impl ControlHub {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome> {
         self.ensure_provider_io()?;
         let controller = self.controller(&provider)?;
         let model = validate_model(model)?;
-        if self.yolo && !controller.supports_yolo() {
+        if yolo && !controller.supports_yolo() {
             bail!(
-                "{} does not expose a verified permission-bypass mode; restart without --yolo",
+                "{} does not expose a verified permission-bypass mode; YOLO remains armed",
                 provider.label()
             );
         }
@@ -505,9 +505,9 @@ impl ControlHub {
             provider,
             model,
             prompt,
-            cwd: self.launch_cwd.clone(),
+            cwd,
         };
-        if self.yolo {
+        if yolo {
             controller.launch_foreground_yolo(&request)
         } else {
             controller.launch_foreground(&request)
@@ -1963,7 +1963,6 @@ mod tests {
             launch_provider: Provider::Claude,
             launch_cwd: PathBuf::from("/work"),
             provider_io_enabled: true,
-            yolo: false,
             migration_registry: None,
         };
         let mut owned = session("owned123-full");
@@ -2379,7 +2378,6 @@ exit 0
             launch_provider: Provider::Claude,
             launch_cwd: directory.path().into(),
             provider_io_enabled: false,
-            yolo: false,
             migration_registry: None,
         };
         let mut item = session("fixture-session");
@@ -2435,7 +2433,6 @@ exit 0
             launch_provider,
             launch_cwd: PathBuf::from("/work"),
             provider_io_enabled: true,
-            yolo: false,
             migration_registry: None,
         }
     }
@@ -2698,7 +2695,13 @@ exit 0
             }]
         );
         assert_eq!(
-            hub.launch_with(Provider::Pi, Some("custom".into()), "prompt".into())
+            hub.launch_with(
+                Provider::Pi,
+                Some("custom".into()),
+                "prompt".into(),
+                PathBuf::from("/work"),
+                false,
+            )
                 .unwrap_err()
                 .to_string(),
             "Pi does not expose model selection"
@@ -2732,7 +2735,6 @@ exit 0
     #[test]
     fn yolo_hub_refuses_unverified_harnesses_before_dispatch() {
         let mut hub = uncontrolled_hub(Provider::Pi);
-        hub.yolo = true;
         hub.register_controller(Arc::new(StubController {
             provider: Provider::Pi,
             marker: "must-not-launch",
@@ -2740,13 +2742,19 @@ exit 0
         .unwrap();
 
         let error = hub
-            .launch_with(Provider::Pi, None, "safe prompt".into())
+            .launch_with(
+                Provider::Pi,
+                None,
+                "safe prompt".into(),
+                PathBuf::from("/work"),
+                true,
+            )
             .unwrap_err()
             .to_string();
 
         assert_eq!(
             error,
-            "Pi does not expose a verified permission-bypass mode; restart without --yolo"
+            "Pi does not expose a verified permission-bypass mode; YOLO remains armed"
         );
         assert!(hub.yolo_supported_providers().is_empty());
     }

@@ -191,6 +191,7 @@ impl SessionSource for MuseSource {
                         cwd,
                         created_at_ms: 0,
                         name: "Muse Code session".into(),
+                        yolo: false,
                         session_path: Some(path),
                     },
                     false,
@@ -285,12 +286,13 @@ impl MuseController {
                     .collect())
             },
         )?;
-        self.ownership.inner.record(
+        self.ownership.inner.record_with_yolo(
             &session_id,
             &request.cwd,
             &request.prompt,
             Some(&path),
             "Muse Code",
+            yolo,
         )?;
         if matches!(exit, crate::native_session::NativeSessionExit::Backgrounded) {
             crate::native_session::rename_key(&launch_key, &format!("muse:host:{session_id}"))?;
@@ -365,8 +367,13 @@ impl ProviderController for MuseController {
         let spec = self
             .invocation
             .resume(&session.cwd, &session.provider_session_id)?;
+        let yolo = self.ownership.inner.is_yolo(&session.provider_session_id);
         native_outcome(
-            crate::native_session::run(spec.command(), &session.id)?,
+            if yolo {
+                crate::native_session::run_yolo(spec.command(), &session.id, "Muse Code")?
+            } else {
+                crate::native_session::run(spec.command(), &session.id)?
+            },
             &session.provider_session_id,
             "Muse Code",
         )
@@ -435,6 +442,17 @@ fn muse_session(
     if backgrounded {
         capabilities.insert(Capability::Interrupt);
     }
+    let summary = if parsed.summary.is_empty() {
+        record.name.clone()
+    } else {
+        parsed.summary
+    };
+    let yolo_marker = owned && record.yolo;
+    let summary = if yolo_marker {
+        format!("⚠ YOLO · {summary}")
+    } else {
+        summary
+    };
     Ok(AgentSession {
         id,
         provider_session_id: record.session_id.clone(),
@@ -452,19 +470,19 @@ fn muse_session(
         } else {
             SessionState::Completed
         },
-        summary: if parsed.summary.is_empty() {
-            record.name.clone()
-        } else {
-            parsed.summary
-        },
-        raw_state: Some(
-            if backgrounded {
+        summary,
+        raw_state: Some({
+            let lifecycle = if backgrounded {
                 "backgrounded"
             } else {
                 "saved"
+            };
+            if yolo_marker {
+                format!("{lifecycle}; YOLO")
+            } else {
+                lifecycle.into()
             }
-            .into(),
-        ),
+        }),
         pid: None,
         started_at: (record.created_at_ms > 0)
             .then(|| UNIX_EPOCH + Duration::from_millis(record.created_at_ms)),

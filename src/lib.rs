@@ -18,6 +18,7 @@ pub mod pi_supervisor;
 pub mod process;
 pub mod terminal;
 pub mod ui;
+pub mod workspaces;
 
 #[cfg(test)]
 pub(crate) mod test_support {

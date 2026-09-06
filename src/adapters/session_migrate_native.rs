@@ -217,7 +217,12 @@ impl SessionMigrateNativeController {
         {
             bail!("{} model is invalid", self.provider.label());
         }
-
+        if yolo && !self.supports_yolo() {
+            bail!(
+                "{} does not expose a verified permission-bypass mode; YOLO remains armed",
+                self.provider.label()
+            );
+        }
         let before = list_sessions(
             &self.provider,
             &self.executable,
@@ -235,9 +240,6 @@ impl SessionMigrateNativeController {
         );
         let command = launch_command(&self.provider, &self.executable, request, yolo)?;
         let exit = if sqlite::supports(&self.provider) && self.provider != Provider::Devin {
-            if yolo {
-                bail!("YOLO is not verified for this harness");
-            }
             let mut steps = Vec::new();
             if self.provider == Provider::MastraCode {
                 steps.push((sqlite::MASTRA_READY.into(), b"/new\r".to_vec()));
@@ -251,7 +253,16 @@ impl SessionMigrateNativeController {
                     sqlite::prompt_input(&request.prompt),
                 ));
             }
-            crate::native_session::run_with_screen_steps(command, &launch_key, steps)?
+            if yolo {
+                crate::native_session::run_with_screen_steps_yolo(
+                    command,
+                    &launch_key,
+                    steps,
+                    self.provider.label(),
+                )?
+            } else {
+                crate::native_session::run_with_screen_steps(command, &launch_key, steps)?
+            }
         } else if yolo {
             crate::native_session::run_yolo(command, &launch_key, self.provider.label())?
         } else {
@@ -285,12 +296,13 @@ impl SessionMigrateNativeController {
                 .collect())
             },
         )?;
-        self.ownership.inner.record(
+        self.ownership.inner.record_with_yolo(
             &record.session_id,
             &request.cwd,
             &request.prompt,
             record.path.as_deref(),
             self.provider.label(),
+            yolo,
         )?;
         if matches!(exit, crate::native_session::NativeSessionExit::Backgrounded) {
             crate::native_session::rename_key(
@@ -321,7 +333,11 @@ impl ProviderController for SessionMigrateNativeController {
     fn supports_yolo(&self) -> bool {
         matches!(
             self.provider,
-            Provider::OhMyPi | Provider::Grok | Provider::KiloCode | Provider::OpenHands
+            Provider::OhMyPi
+                | Provider::Grok
+                | Provider::KiloCode
+                | Provider::OpenHands
+                | Provider::Hermes
         )
     }
 
@@ -449,6 +465,7 @@ impl ProviderController for SessionMigrateNativeController {
             &session.cwd,
             &session.provider_session_id,
             resume_path.as_deref(),
+            self.ownership.inner.is_yolo(&session.provider_session_id),
         )?;
         if self.provider == Provider::MastraCode {
             command.env(
@@ -686,11 +703,30 @@ fn stored_to_agent(
     } else {
         "saved"
     };
+    let yolo_marker = owned.is_some_and(|record| record.yolo);
     let raw_state = record
         .model
         .as_deref()
-        .map(|model| format!("{lifecycle}; model={}", sanitize(model, 160, "unknown")))
-        .unwrap_or_else(|| lifecycle.into());
+        .map(|model| {
+            format!(
+                "{lifecycle}{}; model={}",
+                if yolo_marker { "; YOLO" } else { "" },
+                sanitize(model, 160, "unknown")
+            )
+        })
+        .unwrap_or_else(|| {
+            if yolo_marker {
+                format!("{lifecycle}; YOLO")
+            } else {
+                lifecycle.into()
+            }
+        });
+    let summary = sanitize(&record.summary, 180, &fallback_name);
+    let summary = if yolo_marker {
+        format!("⚠ YOLO · {summary}")
+    } else {
+        summary
+    };
     Ok(AgentSession {
         id,
         provider_session_id: record.session_id,
@@ -708,7 +744,7 @@ fn stored_to_agent(
         } else {
             SessionState::Completed
         },
-        summary: sanitize(&record.summary, 180, &fallback_name),
+        summary,
         raw_state: Some(raw_state),
         pid: None,
         started_at: record.created_at.or_else(|| {
@@ -770,7 +806,7 @@ fn launch_command(
         }
         Provider::Hermes => {
             if yolo {
-                bail!("YOLO is not verified for Hermes Agent");
+                command.arg("--yolo");
             }
             command.args(["chat", "--cli"]);
             if let Some(model) = &request.model {
@@ -805,6 +841,7 @@ fn resume_command(
     cwd: &Path,
     session_id: &str,
     session_path: Option<&Path>,
+    yolo: bool,
 ) -> Result<Command> {
     require_cwd(cwd, provider.label())?;
     validate_provider_id(provider, session_id)?;
@@ -812,25 +849,47 @@ fn resume_command(
     command.current_dir(cwd);
     match provider {
         Provider::OhMyPi => {
+            if yolo {
+                command.arg("--yolo");
+            }
             let target = session_path
                 .map(|path| path.as_os_str())
                 .unwrap_or_else(|| std::ffi::OsStr::new(session_id));
             command.arg("--resume").arg(target);
         }
         Provider::Grok => {
+            if yolo {
+                command.arg("--yolo");
+            }
             command.args(["--no-auto-update", "--resume", session_id]);
         }
         Provider::KiloCode => {
+            if yolo {
+                command.arg("--yolo");
+            }
             command.args(["--session", session_id]);
         }
         Provider::OpenHands => {
+            if yolo {
+                command.arg("--always-approve");
+            }
             command.args(["--resume", session_id]);
         }
         Provider::Hermes => {
+            if yolo {
+                command.arg("--yolo");
+            }
             command.args(["chat", "--cli", "--resume", session_id]);
         }
-        Provider::MastraCode => {}
+        Provider::MastraCode => {
+            if yolo {
+                bail!("YOLO is not verified for MastraCode");
+            }
+        }
         Provider::Devin => {
+            if yolo {
+                bail!("YOLO is not verified for Devin");
+            }
             command.args(["--resume", session_id]);
         }
         _ => bail!("unsupported native harness"),
@@ -1571,7 +1630,102 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(launch_command(&provider, "native-cli", &request, true).is_err());
+            match provider {
+                Provider::Hermes => {
+                    let yolo = launch_command(&provider, "native-cli", &request, true).unwrap();
+                    assert_eq!(
+                        yolo.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                        ["--yolo", "chat", "--cli", "--model", "provider/model"]
+                    );
+                }
+                Provider::MastraCode | Provider::Devin => {
+                    assert!(launch_command(&provider, "native-cli", &request, true).is_err());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn yolo_owned_native_rows_keep_a_visible_per_session_marker() {
+        let record = StoredSession {
+            session_id: "12345678_123456_abcdef".into(),
+            cwd: PathBuf::from("/work"),
+            name: "Parser task".into(),
+            summary: "Latest answer".into(),
+            model: Some("provider/model".into()),
+            created_at: None,
+            updated_at: None,
+            path: None,
+        };
+        let owned = OwnedNativeSession {
+            session_id: "12345678_123456_abcdef".into(),
+            cwd: PathBuf::from("/work"),
+            created_at_ms: 1,
+            name: "Parser task".into(),
+            yolo: true,
+            session_path: None,
+        };
+
+        let session = stored_to_agent(&Provider::Hermes, record, Some(&owned)).unwrap();
+
+        assert_eq!(session.summary, "⚠ YOLO · Latest answer");
+        assert_eq!(session.raw_state.as_deref(), Some("saved; YOLO; model=provider/model"));
+    }
+
+    #[test]
+    fn verified_yolo_resume_commands_preserve_the_native_security_mode() {
+        let cases = [
+            (
+                Provider::OhMyPi,
+                "session-id",
+                vec!["--yolo", "--resume", "session-id"],
+            ),
+            (
+                Provider::Grok,
+                UUID,
+                vec!["--yolo", "--no-auto-update", "--resume", UUID],
+            ),
+            (
+                Provider::KiloCode,
+                "session-id",
+                vec!["--yolo", "--session", "session-id"],
+            ),
+            (
+                Provider::OpenHands,
+                UUID,
+                vec!["--always-approve", "--resume", UUID],
+            ),
+            (
+                Provider::Hermes,
+                "12345678_123456_abcdef",
+                vec![
+                    "--yolo",
+                    "chat",
+                    "--cli",
+                    "--resume",
+                    "12345678_123456_abcdef",
+                ],
+            ),
+        ];
+        for (provider, session_id, expected) in cases {
+            let command = resume_command(
+                &provider,
+                "native-cli",
+                Path::new("/work"),
+                session_id,
+                None,
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{provider:?}"
+            );
         }
     }
 

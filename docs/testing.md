@@ -86,16 +86,16 @@ Reproduction and limitations:
   credential-gated host probes remained explicitly ignored.
 - Exact argv tests cover the verified native mappings for Claude Code, Codex,
   Cursor, Antigravity, Mistral Vibe, Muse Code, Qwen Code, Kimi Code, Oh My Pi,
-  Grok, Kilo Code, and OpenHands. Safe launches are checked separately so the
+  Grok, Kilo Code, OpenHands, and Hermes Agent. Safe launches are checked separately so the
   flags cannot leak into the default path.
 - A hub-level regression rejects an unsupported harness before provider
   dispatch. Renderer and parser tests prove that the option is explicit for
   both `open-agent-view` and `oav`, unsupported picker rows are marked, and the
-  dangerous mode stays visible in the dashboard and composer.
+  one-session warning is visible in the composer but absent from the dashboard.
 - A real outer PTY starts OAV with `--yolo`, selects Antigravity and an exact
   model, verifies the native argument and absence of the mutually exclusive
   sandbox flag, sees the warning in the provider screen, backgrounds it, and
-  stops the exact retained session from the still-marked dashboard.
+  stops the exact retained session from a dashboard without a global YOLO banner.
 
 ## v0.1.50 migration and Codex supervision gate (2026-08-31)
 

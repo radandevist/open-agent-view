@@ -29,6 +29,7 @@ use open_agent_view::maintenance::{
     execute_completed_archive, plan_completed_archive, BulkArchiveReport,
 };
 use open_agent_view::migration::{MigrationClient, MigrationRegistry};
+use open_agent_view::workspaces::WorkspaceRegistry;
 #[cfg(target_os = "linux")]
 use open_agent_view::opencode_supervisor::OpenCodeSupervisor;
 use open_agent_view::pi_supervisor::run_pi_supervisor_daemon;
@@ -505,6 +506,7 @@ fn main() -> Result<()> {
     let hidden_sessions = HiddenSessions::load_default()?;
     let session_aliases = SessionAliases::load_default()?;
     let migration_registry = MigrationRegistry::load_default()?;
+    let workspace_registry = WorkspaceRegistry::load_default()?;
     let migration_client = MigrationClient::host(cli.session_migrate_bin.clone())
         .with_source_cli(Provider::OpenCode, cli.opencode_bin.clone())
         .with_source_cli(Provider::KiloCode, cli.kilo_bin.clone());
@@ -550,10 +552,11 @@ fn main() -> Result<()> {
         && executable_available(&cli.mastracode_bin);
     let devin_enabled =
         host_providers_enabled && !cli.no_host_devin && executable_available(&cli.devin_bin);
-    let launch_cwd = match cli.launch_cwd {
-        Some(path) => path,
-        None => std::env::current_dir()?,
-    };
+    let launch_cwd = workspace_registry.validate_selection(
+        cli.launch_cwd
+            .as_deref()
+            .unwrap_or(std::env::current_dir()?.as_path()),
+    )?;
     let launch_provider = match cli.launch_provider {
         LaunchProvider::Claude => Provider::Claude,
         LaunchProvider::Codex => Provider::Codex,
@@ -592,7 +595,6 @@ fn main() -> Result<()> {
         launch_provider,
         launch_cwd: launch_cwd.clone(),
         provider_io_enabled,
-        yolo: cli.yolo,
     })?;
     control.register_migration_registry(migration_registry.clone());
     #[cfg(target_os = "linux")]
@@ -983,6 +985,9 @@ fn main() -> Result<()> {
         &request,
         Duration::from_millis(cli.refresh_ms),
         &control,
+        launch_cwd,
+        cli.yolo,
+        workspace_registry,
         hidden_sessions,
         session_aliases,
         MigrationServices::new(migration_client, migration_registry),
@@ -1226,7 +1231,6 @@ fn run_completed_archive(
         launch_provider: Provider::Codex,
         launch_cwd: std::env::current_dir()?,
         provider_io_enabled: true,
-        yolo: false,
     })?;
     let supervisor = control
         .codex_supervisor()

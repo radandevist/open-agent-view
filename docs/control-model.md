@@ -80,18 +80,25 @@ The verified mappings are Claude Code
 Linux managed sessions, Antigravity `--dangerously-skip-permissions`, Muse Code
 `--yolo`, Mistral Vibe `--auto-approve`, Qwen Code `--yolo`, Kimi Code
 `--yolo`, Oh My Pi `--yolo`, Grok `--yolo`, Kilo Code `--yolo`, and OpenHands
-`--always-approve`. OAV refuses every other harness before launch. In
+`--always-approve`, and Hermes Agent `--yolo`. OAV refuses every other harness before launch. In
 particular, Pi's project-trust `--approve` option is not treated as a permission
 bypass, and OpenCode's top-level YOLO mode is not claimed because its attach
 client does not accept that flag.
 
-The dashboard and task composer keep a visible warning for the entire OAV
-process. A provider-native PTY prints the same warning on first entry and keeps
-it in the terminal title when first entered or resumed. Persisted Claude,
-Codex, and Cursor ownership
-records remember which OAV-created sessions need that native warning after a
-dashboard restart. Existing sessions retain the policy with which they were
-created; starting OAV with `--yolo` does not retrofit them.
+The `--yolo` flag pre-arms only the next task launch; `/yolo` requires an
+explicit confirmation in the composer. There is no global dashboard YOLO
+banner. Unsupported launch targets fail before provider dispatch and leave the
+armed state available. A successful launch consumes it, while a failed launch
+retains it. A provider-native PTY prints the warning on first entry and keeps it
+in the terminal title when first entered or resumed. Persisted ownership records
+carry the per-session marker, with legacy records defaulting to the safe mode.
+Existing sessions retain the policy with which they were created; starting OAV
+with `--yolo` does not retrofit them.
+
+The new-task composer starts in the canonical current directory. `/workspace`
+opens a searchable picker of full absolute paths from successful launch history;
+`/workspace /absolute/path` selects a validated path directly. Workspace history
+is private and is written only after a provider launch succeeds.
 
 Missing-harness setup is a separate explicit mutation. `open-agent-view setup
 HARNESS` names the official source and requires a terminal confirmation (or
@@ -384,7 +391,7 @@ visibility only. Unknown ACP client requests
 are rejected explicitly, and pending permission requests are never answered
 automatically.
 
-## Oh My Pi, Grok, Kilo Code, and OpenHands ownership
+## Oh My Pi, Grok, Kilo Code, OpenHands, and Hermes ownership
 
 These native harnesses expose durable session identities and native resume
 commands. OAV observes their bounded native inventories but never adopts an

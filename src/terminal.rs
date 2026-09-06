@@ -24,6 +24,7 @@ use crate::domain::{AgentSession, Capability, Provider, SessionSnapshot, Session
 use crate::hidden::HiddenSessions;
 use crate::migration::{MigrationClient, MigrationOutcome, MigrationRegistry, MigrationRequest};
 use crate::ui;
+use crate::workspaces::WorkspaceRegistry;
 
 // Apply a burst of already-buffered terminal input before drawing. Holding an
 // arrow key can otherwise enqueue hundreds of repeat events, each of which
@@ -68,6 +69,8 @@ struct LaunchWorkerResult {
     provider: Provider,
     model: Option<String>,
     prompt: String,
+    cwd: std::path::PathBuf,
+    yolo: bool,
     open_when_visible: bool,
     known_session_ids: BTreeSet<String>,
     result: Result<ControlOutcome, String>,
@@ -79,6 +82,8 @@ struct LaunchJob {
     provider: Provider,
     model: Option<String>,
     prompt: String,
+    cwd: std::path::PathBuf,
+    yolo: bool,
     open_when_visible: bool,
     known_session_ids: BTreeSet<String>,
 }
@@ -106,6 +111,9 @@ pub fn run_dashboard(
     request: &DiscoveryRequest,
     refresh_interval: Duration,
     control: &ControlHub,
+    launch_cwd: std::path::PathBuf,
+    initial_yolo: bool,
+    workspaces: WorkspaceRegistry,
     hidden_sessions: HiddenSessions,
     session_aliases: SessionAliases,
     migrations: MigrationServices,
@@ -178,7 +186,15 @@ pub fn run_dashboard(
         control.default_launch_provider(),
         control.launch_targets(),
     );
-    app.set_yolo(control.yolo_enabled(), control.yolo_supported_providers());
+    app.set_yolo(initial_yolo, control.yolo_supported_providers());
+    app.set_launch_cwd(launch_cwd);
+    app.set_remembered_workspaces(
+        workspaces
+            .list()
+            .into_iter()
+            .map(|record| record.path)
+            .collect(),
+    );
     let mut terminal = TerminalSession::enter()?;
     let initial_size = terminal.terminal.size()?;
     app.set_session_page_size(session_page_size_for_terminal(initial_size.height));
@@ -296,11 +312,27 @@ pub fn run_dashboard(
             match launch_rx.try_recv() {
                 Ok(completed) => {
                     completed_launch_needs_refresh = true;
-                    if completed.sequence == latest_launch_sequence {
-                        launching_provider = None;
-                        match completed.result {
-                            Ok(outcome) => {
-                                app.set_notice(outcome.message);
+                                    if completed.sequence == latest_launch_sequence {
+                                        launching_provider = None;
+                                        match completed.result {
+                                            Ok(outcome) => {
+                                                if completed.yolo {
+                                                    app.disarm_yolo();
+                                                }
+                                                let workspace_error =
+                                                    record_successful_workspace_for_control(
+                                                        &mut app,
+                                                        &workspaces,
+                                                        &completed.cwd,
+                                                    );
+                                                app.set_notice(if let Some(error) = workspace_error {
+                                                    format!(
+                                                        "{}; workspace history not saved: {error}",
+                                                        outcome.message
+                                                    )
+                                                } else {
+                                                    outcome.message
+                                                });
                                 pending_launch =
                                     outcome.provider_session_hint.map(|provider_session_id| {
                                         PendingLaunch {
@@ -519,11 +551,36 @@ pub fn run_dashboard(
                                 );
                                 ActionEffect::default()
                             }
+                            AppAction::SelectWorkspace { cwd } => {
+                                match workspaces.validate_selection(&cwd) {
+                                    Ok(canonical) => {
+                                        app.set_launch_cwd(canonical.clone());
+                                        app.set_notice(format!(
+                                            "next session workspace: {}",
+                                            canonical.display()
+                                        ));
+                                    }
+                                    Err(error) => app.set_notice(format!(
+                                        "workspace selection refused: {error:#}"
+                                    )),
+                                }
+                                ActionEffect::default()
+                            }
                             AppAction::Launch {
                                 provider,
                                 model,
                                 prompt,
-                            } => match control.launch_presentation(&provider) {
+                                cwd,
+                                yolo,
+                            } => {
+                                if yolo && !control.supports_yolo(&provider) {
+                                    app.set_notice(format!(
+                                        "{} does not expose a verified permission-bypass mode; YOLO remains armed",
+                                        provider.label()
+                                    ));
+                                    continue;
+                                }
+                                match control.launch_presentation(&provider) {
                                 Ok(LaunchPresentation::Foreground) => {
                                     app.set_notice(format!(
                                         "starting {} native session…",
@@ -536,7 +593,10 @@ pub fn run_dashboard(
                                         provider,
                                         model,
                                         prompt,
+                                        cwd,
+                                        yolo,
                                         control,
+                                        &workspaces,
                                     )
                                 }
                                 Ok(
@@ -556,6 +616,8 @@ pub fn run_dashboard(
                                             provider,
                                             model,
                                             prompt,
+                                            cwd,
+                                            yolo,
                                             open_when_visible: presentation
                                                 == LaunchPresentation::DeferredForeground,
                                             known_session_ids,
@@ -568,7 +630,8 @@ pub fn run_dashboard(
                                     app.set_notice(format!("launch failed: {error:#}"));
                                     ActionEffect::default()
                                 }
-                            },
+                                }
+                            }
                             other => dispatch_action(&mut terminal, &mut app, other, control),
                         };
                         if let Some(include_completed) = effect.completed_visibility {
@@ -751,8 +814,16 @@ fn schedule_launch(control: ControlHub, job: LaunchJob, sender: mpsc::Sender<Lau
     let operation_provider = job.provider.clone();
     let operation_model = job.model.clone();
     let operation_prompt = job.prompt.clone();
+    let operation_cwd = job.cwd.clone();
+    let operation_yolo = job.yolo;
     schedule_launch_job(job, sender, move || {
-        control.launch_with(operation_provider, operation_model, operation_prompt)
+        control.launch_with(
+            operation_provider,
+            operation_model,
+            operation_prompt,
+            operation_cwd,
+            operation_yolo,
+        )
     });
 }
 
@@ -785,7 +856,9 @@ fn schedule_launch_job(
             sequence: job.sequence,
             provider: job.provider,
             model: job.model,
-            prompt: job.prompt,
+                                        prompt: job.prompt,
+            cwd: job.cwd,
+            yolo: job.yolo,
             open_when_visible: job.open_when_visible,
             known_session_ids: job.known_session_ids,
             result,
@@ -799,7 +872,10 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     provider: Provider,
     model: Option<String>,
     prompt: String,
+    cwd: std::path::PathBuf,
+    yolo: bool,
     control: &C,
+    workspaces: &WorkspaceRegistry,
 ) -> ActionEffect {
     let known_session_ids = provider_session_ids(app, &provider);
     if let Err(error) = terminal.suspend_dashboard() {
@@ -808,11 +884,29 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     }
     let retry_model = model.clone();
     let retry_prompt = prompt.clone();
-    let result = control.launch_foreground_session(provider.clone(), model, prompt);
+    let result = control.launch_foreground_session(
+        provider.clone(),
+        model,
+        prompt,
+        cwd.clone(),
+        yolo,
+    );
     let resume = terminal.resume_dashboard();
     match (result, resume) {
         (Ok(outcome), Ok(())) => {
-            app.set_notice(outcome.message);
+            let workspace_error =
+                record_successful_workspace_for_control(app, workspaces, &cwd);
+            if yolo {
+                app.disarm_yolo();
+            }
+            app.set_notice(if let Some(error) = workspace_error {
+                format!(
+                    "{}; workspace history not saved: {error}",
+                    outcome.message
+                )
+            } else {
+                outcome.message
+            });
             ActionEffect {
                 refresh: true,
                 pending_launch: outcome.provider_session_hint.map(|provider_session_id| {
@@ -852,6 +946,26 @@ fn provider_session_ids(app: &App, provider: &Provider) -> BTreeSet<String> {
         .filter(|session| &session.provider == provider)
         .map(|session| session.id.clone())
         .collect()
+}
+
+fn record_successful_workspace_for_control(
+    app: &mut App,
+    workspaces: &WorkspaceRegistry,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    match workspaces.record_launch(cwd) {
+        Ok(_) => {
+            app.set_remembered_workspaces(
+                workspaces
+                    .list()
+                    .into_iter()
+                    .map(|record| record.path)
+                    .collect(),
+            );
+            None
+        }
+        Err(error) => Some(format!("{error:#}")),
+    }
 }
 
 fn select_pending_launch(app: &mut App, pending: Option<&PendingLaunch>) -> Option<String> {
@@ -1015,6 +1129,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
 
     match key.code {
         KeyCode::Esc => app.escape(),
+        KeyCode::Char('y') if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) => {
+            app.activate()
+        }
+        KeyCode::Char('n') if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) => {
+            app.yolo_selection_cancelled();
+            AppAction::None
+        }
         KeyCode::Char('y')
             if app.overlay == Overlay::Peek
                 && app
@@ -1086,6 +1207,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
             app.move_harness_selection(1);
             AppAction::None
         }
+        KeyCode::Up | KeyCode::Left if app.overlay == Overlay::WorkspacePicker => {
+            app.move_workspace_selection(-1);
+            AppAction::None
+        }
+        KeyCode::Down | KeyCode::Right if app.overlay == Overlay::WorkspacePicker => {
+            app.move_workspace_selection(1);
+            AppAction::None
+        }
         KeyCode::Up if app.overlay == Overlay::None => {
             app.select_previous();
             AppAction::None
@@ -1130,6 +1259,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
             app.move_harness_selection(1);
             AppAction::None
         }
+        KeyCode::Tab if app.overlay == Overlay::WorkspacePicker => {
+            app.move_workspace_selection(1);
+            AppAction::None
+        }
         KeyCode::Tab if app.overlay == Overlay::ModelPicker => {
             app.move_model_selection(1);
             AppAction::None
@@ -1140,6 +1273,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
         }
         KeyCode::BackTab if app.overlay == Overlay::HarnessPicker => {
             app.move_harness_selection(-1);
+            AppAction::None
+        }
+        KeyCode::BackTab if app.overlay == Overlay::WorkspacePicker => {
+            app.move_workspace_selection(-1);
             AppAction::None
         }
         KeyCode::BackTab if app.overlay == Overlay::ModelPicker => {
@@ -1182,6 +1319,7 @@ trait DashboardTerminal {
 }
 
 trait DashboardControl {
+    fn supports_yolo(&self, provider: &Provider) -> bool;
     fn inspect_session(&self, session: &AgentSession) -> Result<String>;
     fn open_session(&self, session: &AgentSession) -> Result<ControlOutcome>;
     fn launch_session(
@@ -1189,14 +1327,18 @@ trait DashboardControl {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: std::path::PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome>;
     fn launch_foreground_session(
         &self,
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: std::path::PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome> {
-        self.launch_session(provider, model, prompt)
+        self.launch_session(provider, model, prompt, cwd, yolo)
     }
     fn authenticate_provider(&self, provider: &Provider) -> Result<ControlOutcome> {
         Err(anyhow!(
@@ -1230,6 +1372,10 @@ trait DashboardControl {
 }
 
 impl DashboardControl for ControlHub {
+    fn supports_yolo(&self, provider: &Provider) -> bool {
+        self.yolo_supported_providers().contains(provider)
+    }
+
     fn inspect_session(&self, session: &AgentSession) -> Result<String> {
         self.inspect(session)
     }
@@ -1243,8 +1389,10 @@ impl DashboardControl for ControlHub {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: std::path::PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome> {
-        self.launch_with(provider, model, prompt)
+        self.launch_with(provider, model, prompt, cwd, yolo)
     }
 
     fn launch_foreground_session(
@@ -1252,8 +1400,10 @@ impl DashboardControl for ControlHub {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: std::path::PathBuf,
+        yolo: bool,
     ) -> Result<ControlOutcome> {
-        self.launch_foreground_with(provider, model, prompt)
+        self.launch_foreground_with(provider, model, prompt, cwd, yolo)
     }
 
     fn authenticate_provider(&self, provider: &Provider) -> Result<ControlOutcome> {
@@ -1412,13 +1562,16 @@ fn dispatch_action<T: DashboardTerminal, C: DashboardControl>(
         AppAction::Migrate { .. } => {
             unreachable!("migration actions are dispatched by the asynchronous worker")
         }
+        AppAction::SelectWorkspace { .. } => ActionEffect::default(),
         AppAction::Launch {
             provider,
             model,
             prompt,
+            cwd,
+            yolo,
         } => {
             let known_session_ids = provider_session_ids(app, &provider);
-            let result = control.launch_session(provider.clone(), model, prompt);
+            let result = control.launch_session(provider.clone(), model, prompt, cwd, yolo);
             match result {
                 Ok(outcome) => {
                     app.set_notice(outcome.message);
@@ -1475,6 +1628,7 @@ fn handle_action_legacy<T: DashboardTerminal, C: DashboardControl>(
         | AppAction::SetupProvider { .. }
         | AppAction::SetupLaunchOption { .. }
         | AppAction::Migrate { .. }
+        | AppAction::SelectWorkspace { .. }
         | AppAction::Hide { .. } => false,
         AppAction::Refresh => {
             app.set_notice("refreshing provider sessions…");
@@ -1791,7 +1945,7 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(SessionSnapshot {
+        let mut app = App::new(SessionSnapshot {
             sessions: vec![AgentSession {
                 id: "worker".into(),
                 provider_session_id: "worker".into(),
@@ -1810,7 +1964,9 @@ mod tests {
                 capabilities: BTreeSet::from([Capability::Inspect]),
             }],
             warnings: vec![],
-        })
+        });
+        app.set_launch_cwd(PathBuf::from("/work"));
+        app
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2172,7 +2328,9 @@ mod tests {
             AppAction::Launch {
                 provider: Provider::Claude,
                 model: None,
-                prompt: "ship".into()
+                prompt: "ship".into(),
+                cwd: PathBuf::from("/work"),
+                yolo: false,
             }
         );
     }
@@ -2455,6 +2613,10 @@ mod tests {
     }
 
     impl DashboardControl for FakeControl {
+        fn supports_yolo(&self, _provider: &Provider) -> bool {
+            true
+        }
+
         fn inspect_session(&self, session: &AgentSession) -> Result<String> {
             self.invoke("inspect", session.id.clone())?;
             Ok(format!("detail for {}", session.id))
@@ -2469,6 +2631,8 @@ mod tests {
             _provider: Provider,
             _model: Option<String>,
             prompt: String,
+            _cwd: std::path::PathBuf,
+            _yolo: bool,
         ) -> Result<ControlOutcome> {
             let mut outcome = self.invoke("launch", prompt)?;
             outcome.provider_session_hint = self.launch_hint.map(str::to_owned);
@@ -2678,6 +2842,8 @@ mod tests {
                 provider: Provider::Claude,
                 model: None,
                 prompt: "build".into(),
+                cwd: PathBuf::from("/work"),
+                yolo: false,
             },
             AppAction::Reply {
                 session_id: "worker".into(),
@@ -2739,6 +2905,8 @@ mod tests {
                 provider: Provider::Pi,
                 model: Some("openai/gpt-5".into()),
                 prompt: "build".into(),
+                cwd: PathBuf::from("/work"),
+                yolo: false,
             },
             &control,
         );
@@ -2751,6 +2919,74 @@ mod tests {
     }
 
     #[test]
+    fn successful_foreground_launch_updates_the_workspace_picker() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let registry = WorkspaceRegistry::load(directory.path().join("workspaces.json")).unwrap();
+        let mut app = app();
+        let mut terminal = FakeTerminal::default();
+        let control = FakeControl::default();
+
+        dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            Provider::Pi,
+            None,
+            "build".into(),
+            directory.path().to_owned(),
+            false,
+            &control,
+            &registry,
+        );
+
+        assert_eq!(
+            app.remembered_workspaces,
+            vec![directory.path().canonicalize().unwrap()]
+        );
+        assert_eq!(registry.list().len(), 1);
+    }
+
+    #[test]
+    fn failed_foreground_launch_keeps_yolo_armed_and_does_not_remember_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let registry = WorkspaceRegistry::load(directory.path().join("workspaces.json")).unwrap();
+        let mut app = app();
+        app.set_yolo(true, BTreeSet::from([Provider::Pi]));
+        let mut terminal = FakeTerminal::default();
+        let control = FakeControl {
+            fail_on: Some("launch"),
+            ..FakeControl::default()
+        };
+
+        dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            Provider::Pi,
+            None,
+            "build".into(),
+            directory.path().to_owned(),
+            true,
+            &control,
+            &registry,
+        );
+
+        assert!(app.yolo);
+        assert!(app.remembered_workspaces.is_empty());
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
     fn slow_launch_job_does_not_block_keyboard_state_changes() {
         let (sender, receiver) = mpsc::channel();
         schedule_launch_job(
@@ -2759,6 +2995,8 @@ mod tests {
                 provider: Provider::Pi,
                 model: None,
                 prompt: "build".into(),
+                cwd: PathBuf::from("/work"),
+                yolo: false,
                 open_when_visible: false,
                 known_session_ids: BTreeSet::from(["pi:host:old".into()]),
             },
@@ -3027,6 +3265,8 @@ mod tests {
                     provider: Provider::Claude,
                     model: None,
                     prompt: "x".into(),
+                    cwd: PathBuf::from("/work"),
+                    yolo: false,
                 },
                 "launch failed",
             ),

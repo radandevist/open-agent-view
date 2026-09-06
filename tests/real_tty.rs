@@ -568,6 +568,7 @@ printf '%s\n' '{"session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","target_form
             fixture.to_str().expect("UTF-8 fixture path"),
             "--all",
             "--include-interactive",
+            "--no-host-hermes",
             "--session-migrate-bin",
             migrator.to_str().expect("UTF-8 migrator path"),
             "--refresh-ms",
@@ -964,6 +965,7 @@ fn harness_picker_switches_visible_backends_without_losing_the_draft() {
             "--no-host-opencode",
             "--no-host-copilot",
             "--no-host-cursor",
+            "--no-host-hermes",
             "--no-host-antigravity",
             "--no-host-mistral-vibe",
             "--no-host-muse",
@@ -1088,6 +1090,7 @@ exit 0"#,
             "--no-host-muse",
             "--no-host-qwen",
             "--no-host-kimi",
+            "--no-host-hermes",
             "--refresh-ms",
             "60000",
         ]);
@@ -1774,12 +1777,16 @@ while :; do sleep 1; done
         ]);
     });
 
-    app.wait_for("persistent dashboard YOLO warning", |screen| {
-        screen.contains("⚠ YOLO MODE")
-            && screen.contains("native permission safeguards are relaxed")
+    app.wait_for("dashboard without a global YOLO warning", |screen| {
+        screen.contains("Open Agent View")
+            && !screen.contains("⚠ YOLO MODE")
             && !screen.contains("loading provider sessions")
     });
     app.send(b"explicit yolo task");
+    app.wait_for("composer YOLO pre-arm", |screen| {
+        screen.contains("⚠ YOL")
+            && screen.contains("explicit yolo task")
+    });
     app.send(ENTER);
     app.wait_for("authenticated Antigravity YOLO model picker", |screen| {
         screen.contains("choose Antigravity model") && screen.contains("gemini-3-pro")
@@ -1807,10 +1814,10 @@ while :; do sleep 1; done
 
     app.send(SHIFT_LEFT);
     app.wait_for(
-        "dashboard warning after backgrounding YOLO session",
+        "dashboard after backgrounding YOLO session",
         |screen| {
             screen.contains("Open Agent View")
-                && screen.contains("⚠ YOLO MODE")
+                && !screen.contains("⚠ YOLO MODE")
                 && screen.contains("Antigravity native session is backgrounded")
         },
     );

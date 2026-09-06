@@ -23,6 +23,8 @@ pub(super) struct OwnedNativeSession {
     pub cwd: PathBuf,
     pub created_at_ms: u64,
     pub name: String,
+    #[serde(default)]
+    pub yolo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_path: Option<PathBuf>,
 }
@@ -61,6 +63,17 @@ impl NativeOwnership {
             .unwrap_or(false)
     }
 
+    pub fn is_yolo(&self, session_id: &str) -> bool {
+        self.records
+            .lock()
+            .map(|records| {
+                records
+                    .iter()
+                    .any(|record| record.session_id == session_id && record.yolo)
+            })
+            .unwrap_or(false)
+    }
+
     pub fn records(&self) -> Vec<OwnedNativeSession> {
         self.records
             .lock()
@@ -68,6 +81,7 @@ impl NativeOwnership {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn record(
         &self,
         session_id: &str,
@@ -75,6 +89,18 @@ impl NativeOwnership {
         name: &str,
         session_path: Option<&Path>,
         label: &str,
+    ) -> Result<()> {
+        self.record_with_yolo(session_id, cwd, name, session_path, label, false)
+    }
+
+    pub fn record_with_yolo(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        name: &str,
+        session_path: Option<&Path>,
+        label: &str,
+        yolo: bool,
     ) -> Result<()> {
         validate_id(session_id, label)?;
         let mut records = self
@@ -88,6 +114,7 @@ impl NativeOwnership {
             cwd: cwd.to_owned(),
             created_at_ms: now_millis(),
             name: sanitize(name, 80, &format!("{label} session")),
+            yolo,
             session_path: session_path.map(Path::to_owned),
         });
         persist(&self.path, &updated, label)?;
@@ -300,6 +327,43 @@ mod tests {
             restored.records()[0].session_path.as_deref(),
             Some(Path::new("/private/session"))
         );
+        assert!(!restored.records()[0].yolo);
+    }
+
+    #[test]
+    fn old_records_default_safe_and_yolo_records_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.json");
+        fs::write(
+            &path,
+            r#"[{"sessionId":"legacy","cwd":"/work","createdAtMs":1,"name":"Legacy"}]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let restored = NativeOwnership::load(path.clone(), "Test").unwrap();
+        assert!(!restored.records()[0].yolo);
+
+        restored
+            .record_with_yolo(
+                "armed",
+                Path::new("/work"),
+                "Armed",
+                None,
+                "Test",
+                true,
+            )
+            .unwrap();
+        let input = fs::read_to_string(&path).unwrap();
+        assert!(input.contains("\"yolo\": true"));
+        assert!(NativeOwnership::load(path, "Test")
+            .unwrap()
+            .records()
+            .iter()
+            .any(|record| record.session_id == "armed" && record.yolo));
     }
 
     #[cfg(unix)]

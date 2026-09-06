@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::domain::{
@@ -31,6 +31,7 @@ pub enum Overlay {
     Peek,
     HarnessPicker,
     ModelPicker,
+    WorkspacePicker,
     MigrationTargetPicker { session_id: String },
     Composer(ComposerMode),
     Confirm(ConfirmTarget),
@@ -61,6 +62,7 @@ pub enum ConfirmTarget {
         key: String,
         session_ids: Vec<String>,
     },
+    Yolo,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +96,11 @@ pub enum AppAction {
         provider: Provider,
         model: Option<String>,
         prompt: String,
+        cwd: PathBuf,
+        yolo: bool,
+    },
+    SelectWorkspace {
+        cwd: PathBuf,
     },
     Reply {
         session_id: String,
@@ -149,6 +156,7 @@ pub struct App {
     pub launch_targets: Vec<LaunchTarget>,
     pub launch_provider: Provider,
     pub launch_model: Option<String>,
+    pub launch_cwd: PathBuf,
     pub yolo: bool,
     pub yolo_supported_providers: BTreeSet<Provider>,
     pub harness_selection: usize,
@@ -157,6 +165,9 @@ pub struct App {
     pub model_selection: usize,
     pub migration_targets: Vec<Provider>,
     pub migration_selection: usize,
+    pub remembered_workspaces: Vec<PathBuf>,
+    pub workspace_filter: String,
+    pub workspace_selection: usize,
     pub models_loading: bool,
     pub models_provider: Option<Provider>,
     pub models_error: Option<String>,
@@ -221,6 +232,7 @@ impl App {
             launch_targets,
             launch_provider,
             launch_model: None,
+            launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             yolo: false,
             yolo_supported_providers: BTreeSet::new(),
             harness_selection,
@@ -229,6 +241,9 @@ impl App {
             model_selection: 0,
             migration_targets: Vec::new(),
             migration_selection: 0,
+            remembered_workspaces: Vec::new(),
+            workspace_filter: String::new(),
+            workspace_selection: 0,
             models_loading: false,
             models_provider: None,
             models_error: None,
@@ -256,6 +271,64 @@ impl App {
     pub fn set_yolo(&mut self, enabled: bool, supported_providers: BTreeSet<Provider>) {
         self.yolo = enabled;
         self.yolo_supported_providers = supported_providers;
+    }
+
+    pub fn set_launch_cwd(&mut self, cwd: PathBuf) {
+        self.launch_cwd = cwd;
+    }
+
+    pub fn launch_cwd(&self) -> &Path {
+        &self.launch_cwd
+    }
+
+    pub fn set_remembered_workspaces(&mut self, workspaces: Vec<PathBuf>) {
+        self.remembered_workspaces = workspaces;
+        self.workspace_selection = self
+            .workspace_choices()
+            .iter()
+            .position(|path| path == &self.launch_cwd)
+            .unwrap_or(0);
+    }
+
+    pub fn workspace_choices(&self) -> Vec<PathBuf> {
+        let needle = self.workspace_filter.to_ascii_lowercase();
+        self.remembered_workspaces
+            .iter()
+            .filter(|path| path.to_string_lossy().to_ascii_lowercase().contains(&needle))
+            .cloned()
+            .collect()
+    }
+
+    pub fn open_workspace_picker(&mut self) {
+        self.workspace_filter.clear();
+        self.workspace_selection = self
+            .workspace_choices()
+            .iter()
+            .position(|path| path == &self.launch_cwd)
+            .unwrap_or(0);
+        self.notice = None;
+        self.overlay = Overlay::WorkspacePicker;
+    }
+
+    pub fn move_workspace_selection(&mut self, delta: isize) {
+        let len = self.workspace_choices().len();
+        if len == 0 {
+            self.workspace_selection = 0;
+            return;
+        }
+        self.workspace_selection =
+            (self.workspace_selection as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    pub fn yolo_selection_cancelled(&mut self) {
+        if self.overlay == Overlay::Confirm(ConfirmTarget::Yolo) {
+            self.overlay = Overlay::Composer(ComposerMode::NewSession);
+            self.notice = None;
+        }
+    }
+
+    pub fn disarm_yolo(&mut self) {
+        self.yolo = false;
     }
 
     pub fn replace_snapshot(&mut self, snapshot: SessionSnapshot) {
@@ -479,6 +552,7 @@ impl App {
                     self.confirm_model_selection()
                 }
             }
+            Overlay::WorkspacePicker => self.confirm_workspace_selection(),
             Overlay::MigrationTargetPicker { .. } => {
                 self.confirm_migration_target();
                 AppAction::None
@@ -516,6 +590,17 @@ impl App {
             Overlay::ModelPicker => {
                 self.overlay = Overlay::Composer(ComposerMode::NewSession);
                 self.model_filter.clear();
+                self.notice = None;
+                AppAction::None
+            }
+            Overlay::WorkspacePicker => {
+                self.workspace_filter.clear();
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
+                self.notice = None;
+                AppAction::None
+            }
+            Overlay::Confirm(ConfirmTarget::Yolo) => {
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
                 self.notice = None;
                 AppAction::None
             }
@@ -1058,6 +1143,11 @@ impl App {
             self.reconcile_model_selection();
             return;
         }
+        if self.overlay == Overlay::WorkspacePicker {
+            self.workspace_filter.push(character);
+            self.workspace_selection = 0;
+            return;
+        }
         let peek_is_writable = self.overlay == Overlay::Peek
             && self.selected_session().is_some_and(|session| {
                 session.capabilities.contains(&Capability::Reply)
@@ -1072,6 +1162,9 @@ impl App {
         if self.overlay == Overlay::ModelPicker {
             self.model_filter.pop();
             self.reconcile_model_selection();
+        } else if self.overlay == Overlay::WorkspacePicker {
+            self.workspace_filter.pop();
+            self.workspace_selection = 0;
         } else {
             self.input.pop();
         }
@@ -1286,6 +1379,11 @@ impl App {
             ConfirmTarget::Archive { id } => AppAction::Archive { session_id: id },
             ConfirmTarget::Hide { session_ids } => AppAction::Hide { session_ids },
             ConfirmTarget::Group { session_ids, .. } => AppAction::Delete { session_ids },
+            ConfirmTarget::Yolo => {
+                self.yolo = true;
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
+                AppAction::None
+            }
         }
     }
 
@@ -1311,6 +1409,8 @@ impl App {
                 provider: self.launch_provider.clone(),
                 model: self.launch_model.clone(),
                 prompt: input,
+                cwd: self.launch_cwd.clone(),
+                yolo: self.yolo,
             };
         }
         let (command, argument) = input
@@ -1322,6 +1422,18 @@ impl App {
             "/harness" | "/provider" if argument.is_empty() => self.open_harness_picker(),
             "/harness" | "/provider" => self.select_launch_provider(argument),
             "/model" => return self.select_launch_model(argument),
+            "/workspace" if argument.is_empty() => self.open_workspace_picker(),
+            "/workspace" => {
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
+                return AppAction::SelectWorkspace {
+                    cwd: PathBuf::from(argument),
+                };
+            }
+            "/yolo" if self.yolo => {
+                self.disarm_yolo();
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
+            }
+            "/yolo" => self.overlay = Overlay::Confirm(ConfirmTarget::Yolo),
             "/shell" if self.launch_provider == Provider::Terminal => {
                 return self.select_launch_model(argument)
             }
@@ -1355,6 +1467,19 @@ impl App {
             _ => self.set_notice(format!("unknown dashboard command {command}; use /help")),
         }
         AppAction::None
+    }
+
+    fn confirm_workspace_selection(&mut self) -> AppAction {
+        let Some(cwd) = self.workspace_choices().get(self.workspace_selection).cloned() else {
+            self.overlay = Overlay::Composer(ComposerMode::NewSession);
+            self.workspace_filter.clear();
+            self.notice = Some("no remembered workspaces; use /workspace /absolute/path".into());
+            return AppAction::None;
+        };
+        self.workspace_filter.clear();
+        self.overlay = Overlay::Composer(ComposerMode::NewSession);
+        self.notice = None;
+        AppAction::SelectWorkspace { cwd }
     }
 
     fn select_launch_provider(&mut self, argument: &str) {
@@ -2378,7 +2503,9 @@ mod tests {
             AppAction::Launch {
                 provider: Provider::Claude,
                 model: None,
-                prompt: "build it".into()
+                prompt: "build it".into(),
+                cwd: app.launch_cwd.clone(),
+                yolo: false,
             }
         );
 
@@ -2696,6 +2823,8 @@ mod tests {
                 provider: Provider::Claude,
                 model: Some("opus".into()),
                 prompt: "ship it".into(),
+                cwd: app.launch_cwd.clone(),
+                yolo: false,
             }
         );
 
@@ -3150,5 +3279,77 @@ mod tests {
         );
         assert_eq!(app.input, "investigate the failure");
         assert_eq!(app.launch_model, None);
+    }
+
+    #[test]
+    fn workspace_command_and_picker_preserve_the_composer_draft() {
+        let cwd = PathBuf::from("/work/current");
+        let remembered = vec![PathBuf::from("/work/alpha"), PathBuf::from("/work/beta")];
+        let mut app = App::new(SessionSnapshot::default());
+        app.set_launch_cwd(cwd.clone());
+        app.set_remembered_workspaces(remembered.clone());
+        app.start_new_session(None);
+        app.input = "/workspace /work/beta".into();
+
+        assert_eq!(
+            app.activate(),
+            AppAction::SelectWorkspace {
+                cwd: PathBuf::from("/work/beta")
+            }
+        );
+        assert_eq!(app.launch_cwd(), cwd.as_path());
+        assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+
+        app.input = "finish the task".into();
+        app.open_workspace_picker();
+        assert_eq!(app.overlay, Overlay::WorkspacePicker);
+        assert_eq!(app.workspace_choices(), remembered);
+        app.move_workspace_selection(1);
+        assert_eq!(app.activate(), AppAction::SelectWorkspace {
+            cwd: PathBuf::from("/work/beta")
+        });
+        app.set_launch_cwd(PathBuf::from("/work/beta"));
+        assert_eq!(app.launch_cwd(), PathBuf::from("/work/beta").as_path());
+        assert_eq!(app.input, "finish the task");
+
+        app.open_workspace_picker();
+        assert_eq!(app.escape(), AppAction::None);
+        assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+        assert_eq!(app.input, "finish the task");
+    }
+
+    #[test]
+    fn yolo_confirmation_arms_disarms_and_carries_exact_cwd_on_launch() {
+        let cwd = PathBuf::from("/work/exact");
+        let mut app = App::new(SessionSnapshot::default());
+        app.set_launch_cwd(cwd.clone());
+        app.start_new_session(None);
+        app.input = "/yolo".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert_eq!(app.overlay, Overlay::Confirm(ConfirmTarget::Yolo));
+        assert_eq!(app.yolo, false);
+
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app.yolo);
+        assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+
+        app.input = "safe-looking task".into();
+        assert_eq!(
+            app.activate(),
+            AppAction::Launch {
+                provider: Provider::Claude,
+                model: None,
+                prompt: "safe-looking task".into(),
+                cwd,
+                yolo: true,
+            }
+        );
+        assert!(app.yolo);
+
+        app.start_new_session(None);
+        app.input = "/yolo".into();
+        app.activate();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(!app.yolo);
     }
 }

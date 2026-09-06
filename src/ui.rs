@@ -53,6 +53,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         Overlay::HarnessPicker => (3 + input_line_count(&app.input).saturating_sub(1))
             .min(7)
             .min(area.height.saturating_sub(5)),
+        Overlay::WorkspacePicker => (3 + input_line_count(&app.workspace_filter).saturating_sub(1))
+            .min(7)
+            .min(area.height.saturating_sub(5)),
         Overlay::Composer(_) => (3 + input_line_count(&app.input).saturating_sub(1))
             .min(7)
             .min(area.height.saturating_sub(5)),
@@ -80,6 +83,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_harness_picker(frame, app, area);
     } else if app.overlay == Overlay::ModelPicker {
         render_model_picker(frame, app, area);
+    } else if app.overlay == Overlay::WorkspacePicker {
+        render_workspace_picker(frame, app, area);
     } else if matches!(app.overlay, Overlay::MigrationTargetPicker { .. }) {
         render_migration_target_picker(frame, app, area);
     }
@@ -117,10 +122,6 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled("◇ ", Style::default().fg(ACCENT)),
                 Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    if app.yolo { "  ⚠ YOLO" } else { "" },
-                    Style::default().fg(ATTENTION).add_modifier(Modifier::BOLD),
-                ),
             ]),
             Line::from(format!(
                 "{awaiting} awaiting · {working} working · {completed_status}"
@@ -145,16 +146,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Style::default().fg(DIM),
                 ),
             ]),
-            Line::from(Span::styled(
-                if app.yolo {
-                    "       ⚠ YOLO MODE · native permission safeguards are relaxed"
-                } else {
-                    ""
-                },
-                Style::default()
-                    .fg(ATTENTION)
-                    .add_modifier(Modifier::BOLD),
-            )),
+            Line::default(),
         ]
     } else {
         vec![
@@ -170,14 +162,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 format!("{awaiting} awaiting · {working} working · {completed_status}"),
                 Style::default().fg(DIM),
             )),
-            Line::from(Span::styled(
-                if app.yolo {
-                    "⚠ YOLO · permission safeguards relaxed"
-                } else {
-                    ""
-                },
-                Style::default().fg(ATTENTION).add_modifier(Modifier::BOLD),
-            )),
+            Line::default(),
         ]
     };
     frame.render_widget(
@@ -191,7 +176,10 @@ fn render_session_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut selected_line = None;
     let selection_visible = !matches!(
         app.overlay,
-        Overlay::Composer(_) | Overlay::HarnessPicker | Overlay::ModelPicker
+        Overlay::Composer(_)
+            | Overlay::HarnessPicker
+            | Overlay::ModelPicker
+            | Overlay::WorkspacePicker
     );
 
     for (group_position, group) in app.groups().iter().enumerate() {
@@ -435,7 +423,10 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     } else if matches!(
         app.overlay,
-        Overlay::Composer(ComposerMode::NewSession) | Overlay::HarnessPicker | Overlay::ModelPicker
+        Overlay::Composer(ComposerMode::NewSession)
+            | Overlay::HarnessPicker
+            | Overlay::ModelPicker
+            | Overlay::WorkspacePicker
     ) {
         let launch_option = app.launch_model.as_deref().unwrap_or("default");
         let option_label = if app.launch_provider == Provider::Terminal {
@@ -443,10 +434,11 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             "model"
         };
-        let yolo = if app.yolo { " · ⚠ YOLO" } else { "" };
+        let yolo = if app.yolo { " · ⚠ YOLO · next session only" } else { "" };
+        let workspace = format!(" · workspace {}", app.launch_cwd.display());
         block = block.title(Span::styled(
             format!(
-                " new task · harness {} · {option_label} {launch_option}{yolo} ",
+                " new task · harness {} · {option_label} {launch_option}{workspace}{yolo} ",
                 app.launch_provider.label(),
             ),
             if app.yolo {
@@ -459,6 +451,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (prefix, content, editable) = match &app.overlay {
         Overlay::Composer(ComposerMode::NewSession) => ("❯ ", app.input.as_str(), true),
         Overlay::HarnessPicker | Overlay::ModelPicker => ("❯ ", app.input.as_str(), false),
+        Overlay::WorkspacePicker => ("❯ filter ", app.workspace_filter.as_str(), true),
         Overlay::Composer(ComposerMode::Rename { .. }) => ("name ❯ ", app.input.as_str(), true),
         Overlay::Composer(ComposerMode::MigrationName { .. }) => {
             ("name ❯ ", app.input.as_str(), true)
@@ -724,11 +717,11 @@ fn contextual_footer(app: &App, width: u16) -> String {
             "enter migrate · esc targets".into()
         }
         Overlay::Composer(ComposerMode::NewSession) if width >= 100 => format!(
-            "enter create · tab harness · shift+tab {} · ctrl+j newline · esc cancel",
+            "enter create · tab harness · shift+tab {} · /workspace · /yolo · ctrl+j newline · esc cancel",
             if app.launch_provider == Provider::Terminal { "shell" } else { "model" }
         ),
         Overlay::Composer(ComposerMode::NewSession) if width >= 70 => format!(
-            "enter create · tab harness · shift+tab {} · ctrl+j newline · esc cancel",
+            "enter · tab · shift+tab {} · /workspace · /yolo · ctrl+j newline · esc",
             if app.launch_provider == Provider::Terminal { "shell" } else { "model" }
         ),
         Overlay::Composer(ComposerMode::NewSession) if width >= 55 => {
@@ -740,6 +733,13 @@ fn contextual_footer(app: &App, width: u16) -> String {
             app.launch_targets.len().min(9)
         ),
         Overlay::HarnessPicker => "↑/↓ choose · enter · esc".into(),
+        Overlay::WorkspacePicker if app.workspace_choices().is_empty() => {
+            "type /workspace /absolute/path · esc back".into()
+        }
+        Overlay::WorkspacePicker if width >= 55 => {
+            "type to filter · ↑/↓ or tab to choose · enter select · esc back".into()
+        }
+        Overlay::WorkspacePicker => "type filter · ↑/↓ · enter · esc".into(),
         Overlay::ModelPicker if width >= 70 => format!(
             "type to filter · ↑/↓ move · page up/down · enter {} · esc back",
             if selected_shell_install(app) { "install" } else { "select" }
@@ -905,6 +905,8 @@ fn help_actions(app: &App) -> Vec<String> {
     actions.push("tab for new task/harness picker".into());
     actions.push("/harness [name] switches harness".into());
     actions.push("/model [name|default] selects a model (or Terminal shell)".into());
+    actions.push("/workspace [absolute path] selects the next workspace".into());
+    actions.push("/yolo arms one next-session launch after confirmation".into());
     actions.push("/shell [name|default] selects a Terminal shell".into());
     actions.push("/login opens native setup".into());
     actions.push("/setup [harness] installs/signs in".into());
@@ -1142,6 +1144,78 @@ fn render_migration_target_picker(frame: &mut Frame<'_>, app: &App, area: Rect) 
     );
 }
 
+fn render_workspace_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let choices = app.workspace_choices();
+    let popup_width = area.width.saturating_sub(2).min(100).max(32);
+    let desired_height = choices.len() as u16 + 4;
+    let popup_height = desired_height.min(area.height.saturating_sub(2)).max(5);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(popup_width) / 2,
+        area.y + area.height.saturating_sub(popup_height) / 2,
+        popup_width,
+        popup_height,
+    );
+    let visible_rows = popup_height.saturating_sub(3).max(1) as usize;
+    let start = if choices.is_empty() {
+        0
+    } else {
+        (app.workspace_selection / visible_rows) * visible_rows
+    };
+    let mut lines = choices
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_rows)
+        .map(|(index, path)| {
+            let selected = index == app.workspace_selection;
+            Line::from(format!(
+                " {}{}",
+                if selected { "› " } else { "  " },
+                path.display()
+            ))
+            .style(if selected {
+                Style::default()
+                    .bg(SELECTED_BG)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().bg(BG).fg(FG)
+            })
+        })
+        .collect::<Vec<_>>();
+    if choices.is_empty() {
+        lines.push(Line::from(" /workspace /absolute/path").style(Style::default().fg(ATTENTION)));
+    }
+    lines.push(
+        Line::from(if popup_width >= 58 {
+            " ↑/↓ or tab move · enter select · esc back"
+        } else {
+            " ↑/↓ · enter · esc"
+        })
+        .style(Style::default().fg(DIM)),
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(format!(
+                        " choose workspace{} ",
+                        if app.workspace_filter.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · filter {}", app.workspace_filter)
+                        }
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(ACCENT)),
+            )
+            .style(Style::default().bg(BG).fg(FG))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
 fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let terminal_shells = app.launch_provider == Provider::Terminal;
     let choices = app.model_choices();
@@ -1362,6 +1436,10 @@ fn render_confirmation(frame: &mut Frame<'_>, _: &App, target: &ConfirmTarget, a
             "Delete all {} sessions in {key}?\n\nEnter confirms; escape keeps them.",
             session_ids.len()
         ),
+        ConfirmTarget::Yolo => {
+            "Enable YOLO for the next launched session? y/N\n\nEnter or y arms it; n or escape cancels."
+                .into()
+        }
     };
     frame.render_widget(
         Paragraph::new(sanitize_multiline(&message))
@@ -1621,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn yolo_mode_is_persistently_visible_in_dashboard_and_composer() {
+    fn yolo_mode_is_visible_only_for_the_next_composer_launch() {
         let mut app = App::with_launch_targets(
             SessionSnapshot {
                 sessions: vec![],
@@ -1641,12 +1719,13 @@ mod tests {
             ],
         );
         app.set_yolo(true, BTreeSet::from([Provider::Claude]));
+        app.set_launch_cwd("/work".into());
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let dashboard = buffer_text(terminal.backend().buffer());
-        assert!(dashboard.contains("⚠ YOLO MODE · native permission safeguards are relaxed"));
+        assert!(!dashboard.contains("YOLO MODE"));
 
         app.start_new_session(None);
         terminal.draw(|frame| render(frame, &app)).unwrap();
@@ -1658,6 +1737,25 @@ mod tests {
         let picker = buffer_text(terminal.backend().buffer());
         assert!(picker.contains("Pi"));
         assert!(picker.contains("YOLO unavailable"));
+    }
+
+    #[test]
+    fn workspace_picker_renders_full_remembered_absolute_paths() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.set_remembered_workspaces(vec![
+            "/work/alpha/with-a-long-project-name".into(),
+            "/work/beta".into(),
+        ]);
+        app.open_workspace_picker();
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+
+        assert!(rendered.contains("/work/alpha/with-a-long-project-name"));
+        assert!(rendered.contains("/work/beta"));
+        assert!(rendered.contains("choose workspace"));
     }
 
     #[test]
