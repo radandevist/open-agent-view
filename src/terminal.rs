@@ -106,19 +106,50 @@ impl MigrationServices {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_dashboard(
-    engine: &DiscoveryEngine,
-    request: &DiscoveryRequest,
-    refresh_interval: Duration,
-    control: &ControlHub,
+pub struct DashboardInputs {
     launch_cwd: std::path::PathBuf,
     initial_yolo: bool,
     workspaces: WorkspaceRegistry,
     hidden_sessions: HiddenSessions,
     session_aliases: SessionAliases,
     migrations: MigrationServices,
+}
+
+impl DashboardInputs {
+    pub fn new(
+        launch_cwd: std::path::PathBuf,
+        initial_yolo: bool,
+        workspaces: WorkspaceRegistry,
+        hidden_sessions: HiddenSessions,
+        session_aliases: SessionAliases,
+        migrations: MigrationServices,
+    ) -> Self {
+        Self {
+            launch_cwd,
+            initial_yolo,
+            workspaces,
+            hidden_sessions,
+            session_aliases,
+            migrations,
+        }
+    }
+}
+
+pub fn run_dashboard(
+    engine: &DiscoveryEngine,
+    request: &DiscoveryRequest,
+    refresh_interval: Duration,
+    control: &ControlHub,
+    inputs: DashboardInputs,
 ) -> Result<()> {
+    let DashboardInputs {
+        launch_cwd,
+        initial_yolo,
+        workspaces,
+        hidden_sessions,
+        session_aliases,
+        migrations,
+    } = inputs;
     let MigrationServices {
         client: migration_client,
         registry: migration_registry,
@@ -613,12 +644,14 @@ pub fn run_dashboard(
                                         dispatch_foreground_launch(
                                             &mut terminal,
                                             &mut app,
-                                            provider,
-                                            model,
-                                            prompt,
-                                            cwd,
-                                            yolo,
-                                            yolo_reservation,
+                                            ForegroundLaunchInputs {
+                                                provider,
+                                                model,
+                                                prompt,
+                                                cwd,
+                                                yolo,
+                                                yolo_reservation,
+                                            },
                                             control,
                                             &workspaces,
                                         )
@@ -899,22 +932,37 @@ fn account_yolo_launch_result(app: &mut App, completed: &LaunchWorkerResult) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
-    terminal: &mut T,
-    app: &mut App,
+#[derive(Debug)]
+struct ForegroundLaunchInputs {
     provider: Provider,
     model: Option<String>,
     prompt: String,
     cwd: std::path::PathBuf,
     yolo: bool,
     yolo_reservation: Option<u64>,
+}
+
+fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
+    terminal: &mut T,
+    app: &mut App,
+    inputs: ForegroundLaunchInputs,
     control: &C,
     workspaces: &WorkspaceRegistry,
 ) -> ActionEffect {
+    let ForegroundLaunchInputs {
+        provider,
+        model,
+        prompt,
+        cwd,
+        yolo,
+        yolo_reservation,
+    } = inputs;
     let cwd = match workspaces.validate_selection(&cwd) {
         Ok(canonical) => canonical,
         Err(error) => {
+            if let Some(token) = yolo_reservation {
+                app.finish_yolo_reservation(token, false);
+            }
             app.set_notice(format!("workspace launch refused: {error:#}"));
             return ActionEffect::default();
         }
@@ -3058,12 +3106,14 @@ mod tests {
         dispatch_foreground_launch(
             &mut terminal,
             &mut app,
-            Provider::Pi,
-            None,
-            "build".into(),
-            directory.path().to_owned(),
-            false,
-            None,
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: directory.path().to_owned(),
+                yolo: false,
+                yolo_reservation: None,
+            },
             &control,
             &registry,
         );
@@ -3094,12 +3144,14 @@ mod tests {
         let effect = dispatch_foreground_launch(
             &mut terminal,
             &mut app,
-            Provider::Pi,
-            None,
-            "build".into(),
-            workspace,
-            false,
-            None,
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: workspace,
+                yolo: false,
+                yolo_reservation: None,
+            },
             &control,
             &registry,
         );
@@ -3108,6 +3160,49 @@ mod tests {
         assert!(control.calls.lock().unwrap().is_empty());
         assert!(terminal.calls.is_empty());
         assert!(app.notice.as_deref().unwrap().contains("workspace"));
+    }
+
+    #[test]
+    fn rejected_foreground_workspace_releases_yolo_for_composer_retry() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let workspace = state.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let registry = WorkspaceRegistry::load(state.path().join("workspaces.json")).unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        let mut app = app();
+        app.set_yolo(true, BTreeSet::from([Provider::Pi]));
+        app.start_new_session(None);
+        app.input = "build".into();
+        assert!(app.reserve_yolo(1));
+        let mut terminal = FakeTerminal::default();
+        let control = FakeControl::default();
+
+        let effect = dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: workspace,
+                yolo: true,
+                yolo_reservation: Some(1),
+            },
+            &control,
+            &registry,
+        );
+
+        assert!(!effect.refresh);
+        assert!(control.calls.lock().unwrap().is_empty());
+        assert!(terminal.calls.is_empty());
+        assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+        assert!(app.yolo);
+        assert!(app.reserve_yolo(2));
     }
 
     #[cfg(unix)]
@@ -3133,12 +3228,14 @@ mod tests {
         dispatch_foreground_launch(
             &mut terminal,
             &mut app,
-            Provider::Pi,
-            None,
-            "build".into(),
-            selected,
-            false,
-            None,
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: selected,
+                yolo: false,
+                yolo_reservation: None,
+            },
             &control,
             &registry,
         );
@@ -3171,12 +3268,14 @@ mod tests {
         dispatch_foreground_launch(
             &mut terminal,
             &mut app,
-            Provider::Pi,
-            None,
-            "build".into(),
-            directory.path().to_owned(),
-            true,
-            Some(1),
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: directory.path().to_owned(),
+                yolo: true,
+                yolo_reservation: Some(1),
+            },
             &control,
             &registry,
         );
@@ -3208,12 +3307,14 @@ mod tests {
         dispatch_foreground_launch(
             &mut terminal,
             &mut app,
-            Provider::Pi,
-            None,
-            "build".into(),
-            directory.path().to_owned(),
-            true,
-            Some(1),
+            ForegroundLaunchInputs {
+                provider: Provider::Pi,
+                model: None,
+                prompt: "build".into(),
+                cwd: directory.path().to_owned(),
+                yolo: true,
+                yolo_reservation: Some(1),
+            },
             &control,
             &registry,
         );

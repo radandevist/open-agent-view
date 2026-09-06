@@ -34,7 +34,7 @@ use open_agent_view::opencode_supervisor::OpenCodeSupervisor;
 use open_agent_view::pi_supervisor::run_pi_supervisor_daemon;
 #[cfg(target_os = "linux")]
 use open_agent_view::pi_supervisor::PiSupervisor;
-use open_agent_view::terminal::{run_dashboard, MigrationServices};
+use open_agent_view::terminal::{run_dashboard, DashboardInputs, MigrationServices};
 use open_agent_view::workspaces::WorkspaceRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -985,12 +985,14 @@ fn main() -> Result<()> {
         &request,
         Duration::from_millis(cli.refresh_ms),
         &control,
-        launch_cwd,
-        cli.yolo,
-        workspace_registry,
-        hidden_sessions,
-        session_aliases,
-        MigrationServices::new(migration_client, migration_registry),
+        DashboardInputs::new(
+            launch_cwd,
+            cli.yolo,
+            workspace_registry,
+            hidden_sessions,
+            session_aliases,
+            MigrationServices::new(migration_client, migration_registry),
+        ),
     )?;
 
     Ok(())
