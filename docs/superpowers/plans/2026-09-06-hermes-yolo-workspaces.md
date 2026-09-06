@@ -81,7 +81,7 @@ fn successful_workspace_upsert_is_persistent_newest_first_and_deduplicated() {
     store.record_successful_launch(&first).unwrap();
 
     assert_eq!(store.list(), vec![first.clone(), second]);
-    assert_eq!(Workspaces::load(store.path()).unwrap().startup_workspace().unwrap(), first);
+    assert_eq!(Workspaces::load(store.path()).unwrap().list()[0], first);
 }
 
 #[test]
@@ -124,7 +124,6 @@ impl Workspaces {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self>;
     pub fn path(&self) -> &Path;
     pub fn list(&self) -> Vec<PathBuf>;
-    pub fn startup_workspace(&self) -> Option<PathBuf>;
     pub fn validate_selection(&self, path: &Path) -> Result<PathBuf>;
     pub fn record_successful_launch(&self, path: &Path) -> Result<PathBuf>;
 }
@@ -244,7 +243,7 @@ pub fn launch_with_options(
 
 Refactor `launch_with` and `launch_foreground_with` into safe wrappers so existing callers/tests remain valid. Extend `DashboardControl`, its `ControlHub` implementation, `LaunchJob`, `LaunchWorkerResult`, `schedule_launch`, and `dispatch_foreground_launch` to carry both `cwd` and `yolo`. Remove the dashboard-wide `ControlHubConfig.yolo` policy: the controller sees only the exact launch option. Do not read a mutable global cwd or change OAV's process directory.
 
-At startup, load `Workspaces`, resolve `cli.launch_cwd` first; otherwise use `workspaces.startup_workspace()`; otherwise `std::env::current_dir()`. Validate the selected workspace before constructing `ControlHub`. Pass a clone of `Workspaces` and the initial `cli.yolo` armed value into `run_dashboard`/`App`; `--yolo` must not remain in `ControlHub` after startup.
+At startup, load `Workspaces`, then resolve `cli.launch_cwd` or `std::env::current_dir()`; do not read the workspace store to choose a startup path. Validate the selected workspace before constructing `ControlHub`. Pass a clone of `Workspaces` and the initial `cli.yolo` armed value into `run_dashboard`/`App`; `--yolo` must not remain in `ControlHub` after startup.
 
 - [ ] **Step 4: Record only successful launches**
 
@@ -337,7 +336,7 @@ In the terminal event loop, handle `SelectWorkspace` before controller dispatch:
 
 - [ ] **Step 4: Add a disposable real-PTY regression**
 
-Extend `tests/real_tty.rs` with a fixture-backed dashboard test that starts with two private test workspaces, opens `/workspace`, filters/selects the second path, confirms the composer title changes, launches a fixture provider, backgrounds/returns, restarts OAV, and confirms that path is selected first. The test must use temporary state and fixture executables only; it must not access personal sessions or credentials.
+Extend `tests/real_tty.rs` with a fixture-backed dashboard test that starts with two private test workspaces, opens `/workspace`, filters/selects the second path, confirms the composer title changes, launches a fixture provider, backgrounds/returns, restarts OAV from the first path, and confirms the first path is selected while the second remains in the picker. The test must use temporary state and fixture executables only; it must not access personal sessions or credentials.
 
 - [ ] **Step 5: Run picker checks**
 
@@ -572,7 +571,7 @@ Expected: the test identifies the missing Hermes mapping and workspace command b
 
 - [ ] **Step 3: Update operator documentation without widening claims**
 
-Document `hermes --yolo chat --cli` as the mapping OAV uses; say it bypasses Hermes dangerous-command approvals and is disabled by default. Document that `--yolo` pre-arms the next session and `/yolo` asks `Enable YOLO for the next launched session? y/N`; confirmation survives launch-option changes and failed launches, then is consumed by success. Document `/workspace`, `/workspace /absolute/path`, newest-first persistence after successful launches only, restart default, and one-run `--launch-cwd` precedence. Do not claim a filesystem browser, labels, sync, automatic scanning, or authenticated provider validation.
+Document `hermes --yolo chat --cli` as the mapping OAV uses; say it bypasses Hermes dangerous-command approvals and is disabled by default. Document that `--yolo` pre-arms the next session and `/yolo` asks `Enable YOLO for the next launched session? y/N`; confirmation survives launch-option changes and failed launches, then is consumed by success. Document `/workspace`, `/workspace /absolute/path`, newest-first persistence after successful launches only, current-directory startup, and one-run `--launch-cwd` precedence. Do not claim a filesystem browser, labels, sync, automatic scanning, or authenticated provider validation.
 
 - [ ] **Step 4: Run focused documentation and full code gates serially**
 

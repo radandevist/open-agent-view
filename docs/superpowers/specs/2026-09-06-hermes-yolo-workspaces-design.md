@@ -23,7 +23,7 @@ Make daily OAV launches work for Hermes Agent with its verified explicit YOLO mo
    - `/workspace /absolute/path` selects one existing absolute directory for the current OAV process. It is not immediately saved.
    - After a successful launch, OAV atomically records the workspace and last-used timestamp. Failed/refused launches do not add it.
    - The picker is a fixed remembered list: OAV does not browse the filesystem, crawl projects, synchronize paths, or create labels.
-   - On restart, the most recently successful existing workspace is selected. `--launch-cwd PATH` is a one-run override and wins over persisted selection. If the stored path has disappeared or is invalid, skip it and fall back to the process directory.
+   - On every startup, the current process directory is selected unless `--launch-cwd PATH` is supplied for that run. Remembered paths are picker-only; selecting one does not change the next startup default.
 
 ## Storage and safety
 
@@ -65,7 +65,7 @@ This is intentionally two focused capabilities, not a generic workspace manager:
 - Relative, missing, non-directory, and unsafe paths are rejected without changing selection.
 - A successful launch upserts the selected workspace; a failed/refused launch leaves the store unchanged.
 - The picker orders valid remembered entries newest first, filters by path, selects deterministically, and leaves state unchanged on Esc.
-- Restart chooses the latest valid remembered workspace; an explicit `--launch-cwd` overrides it without changing the persisted default until it succeeds in a launch.
+- Startup chooses the current process directory; an explicit `--launch-cwd` overrides it for that run. Remembered paths remain available in the picker after restart but are never auto-selected.
 - State writes are user-private, atomically replaced, and reject malformed/untrusted existing state according to OAV's current state-file rules.
 
 ## Verification
