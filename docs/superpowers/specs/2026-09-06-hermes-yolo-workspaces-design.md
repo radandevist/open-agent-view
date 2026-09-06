@@ -7,16 +7,19 @@ Make daily OAV launches work for Hermes Agent with its verified explicit YOLO mo
 ## Scope
 
 1. Hermes YOLO
-   - `open-agent-view --yolo` remains opt-in and keeps OAV's existing persistent warning UI.
+   - `open-agent-view --yolo` pre-arms YOLO for exactly the next new session; it does not make the dashboard globally YOLO.
+   - `/yolo` is the equivalent composer command. When currently off, it opens `Enable YOLO for the next launched session? y/N`; after confirmation it is visible beside the selected harness and model. Calling `/yolo` again disarms it without another confirmation.
+   - The armed setting survives edits to the draft, harness, model, and workspace. A failed/refused launch keeps it so the task can be retried; a successful launch consumes it and restores safe-by-default behavior for the next task.
    - Hermes is added only after mapping the exact verified native invocation:
      `hermes --yolo chat --cli [--model ID]`.
    - Normal Hermes launches remain unchanged and do not receive `--yolo`.
-   - OAV must continue to refuse YOLO for MastraCode and other unsupported harnesses before launching a provider process.
+   - Arming is harness-agnostic so `/yolo`, `/harness`, and `/model` can be used in any order. Launching an unsupported harness remains a fail-closed refusal before a provider process starts.
+   - The created YOLO session remains visibly marked in its retained native frontend and OAV ownership metadata after the composer setting is consumed.
    - The foreground Hermes TUI launch path must retain its existing prompt injection, ownership record, workspace correlation, and resume behavior.
 
 2. Remembered workspaces
    - The selected workspace is visible in the new-task composer and is used for every new launch, independent of harness and model selection.
-   - `/workspace` opens a keyboard-filterable picker of remembered workspaces. It supports filter text, arrows/Tab, Enter to select, and Esc to leave the selection unchanged.
+   - `/workspace` opens a keyboard-filterable picker of remembered workspaces. It supports filter text, arrows/Tab, Enter to select, and Esc to leave the selection unchanged. Every row renders the full absolute path; there are no derived project names or stored labels.
    - `/workspace /absolute/path` selects one existing absolute directory for the current OAV process. It is not immediately saved.
    - After a successful launch, OAV atomically records the workspace and last-used timestamp. Failed/refused launches do not add it.
    - The picker is a fixed remembered list: OAV does not browse the filesystem, crawl projects, synchronize paths, or create labels.
@@ -42,7 +45,7 @@ This is intentionally two focused capabilities, not a generic workspace manager:
 - Extend the native SQLite-harness controller's verified YOLO capability and argv construction for `Provider::Hermes` only.
 - Permit the existing foreground SQLite Hermes launch/prompt sequence to run in the explicit YOLO path; preserve the fail-closed guard for every other unverified provider.
 - Add a small state component for loading, validating, selecting, and upserting remembered workspaces.
-- Carry the mutable selected launch workspace through `App`, `AppAction::Launch`, the terminal dispatcher, and `ControlHub` so a choice applies to one exact launch request rather than changing process CWD.
+- Carry the selected workspace and one-session YOLO bit through `App`, `AppAction::Launch`, the terminal dispatcher, and `ControlHub` so both choices apply to one exact launch request rather than changing process CWD or dashboard-wide security state.
 - Add a workspace picker overlay following the existing harness/model picker interaction and render the active workspace in composer/help text.
 - Update the CLI guide, control model, exploration note, README harness behavior, and changelog to state the exact Hermes mapping and workspace contract.
 
@@ -51,9 +54,10 @@ This is intentionally two focused capabilities, not a generic workspace manager:
 ### Hermes YOLO
 
 - With OAV YOLO disabled, an Hermes launch argv contains `chat --cli` and not `--yolo`.
-- With OAV YOLO enabled, an Hermes launch argv contains the global `--yolo` before `chat --cli`, preserves a selected `--model`, and starts from the selected workspace.
-- Hermes remains in OAV's YOLO-supported set; MastraCode remains out of it and fails before provider launch.
-- The Hermes foreground launch retains its queued prompt, created-session correlation, ownership persistence, and background/resume behavior in both safe and YOLO modes.
+- `--yolo` and a confirmed `/yolo` each arm the next launch only; the composer shows that state, a failed/refused launch retains it, and a successful launch consumes it.
+- An armed Hermes launch argv contains the global `--yolo` before `chat --cli`, preserves a selected `--model`, and starts from the selected workspace.
+- An armed session can change harness/model before launch; MastraCode remains unsupported and fails before provider launch if selected.
+- The Hermes foreground launch retains its queued prompt, created-session correlation, ownership persistence, background/resume behavior, and a visible YOLO marker in YOLO mode.
 
 ### Workspaces
 

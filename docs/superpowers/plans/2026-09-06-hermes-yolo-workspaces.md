@@ -4,7 +4,7 @@
 
 **Goal:** Add verified Hermes YOLO launches and a local remembered-workspace picker to the OAV new-session composer.
 
-**Architecture:** Keep provider behavior in the existing native SQLite adapter and make Hermes the sole newly verified YOLO mapping. Add one local `workspaces` state module, modeled on `hidden.rs` security guarantees, and carry an immutable workspace value on each launch action through the App, terminal dispatcher, and ControlHub; never mutate OAV's own process CWD.
+**Architecture:** Keep provider behavior in the existing native SQLite adapter and make Hermes the sole newly verified YOLO mapping. Add one local `workspaces` state module, modeled on `hidden.rs` security guarantees, and carry immutable workspace and `yolo_armed` values on each launch action through the App, terminal dispatcher, and ControlHub; neither setting mutates OAV's own process CWD or becomes dashboard-wide state.
 
 **Tech Stack:** Rust 2021/MSRV 1.75, Ratatui, Crossterm, Serde JSON, existing OAV private-state and native-PTY infrastructure.
 
@@ -20,6 +20,7 @@
 | `src/control.rs` | Builds each `LaunchRequest` from the workspace attached to a single action. |
 | `src/terminal.rs` | Validates picker/path selections via the store and records a workspace only after a successful foreground or asynchronous launch. |
 | `src/main.rs` | Loads the store, resolves startup precedence, and passes it into the dashboard. |
+| `src/adapters/native_owned.rs` | Stores the YOLO launch marker for OAV-owned native sessions. |
 | `src/adapters/session_migrate_native.rs` | Adds Hermes-only YOLO capability/argv and preserves the foreground SQLite prompt sequence. |
 | `src/ui.rs` | Renders the workspace in the composer and the workspace picker/help. |
 | `README.md`, `docs/cli.md`, `docs/control-model.md`, `docs/exploration/shared-sqlite-harnesses.md`, `CHANGELOG.md` | Document the exact Hermes mapping and workspace persistence contract. |
@@ -153,7 +154,7 @@ git add src/lib.rs src/workspaces.rs
 git commit -m "feat: persist successful launch workspaces"
 ```
 
-### Task 3: Make the selected workspace part of the launch contract
+### Task 3: Make selected workspace and YOLO intent part of one launch contract
 
 **Files:**
 - Modify: `src/app.rs:27-177, 1250-1357`
@@ -168,7 +169,7 @@ Add a pure App transition test and a ControlHub request test that assert the pat
 
 ```rust
 #[test]
-fn new_task_action_carries_the_selected_workspace() {
+fn new_task_action_carries_selected_workspace_and_yolo_intent() {
     let workspace = PathBuf::from("/absolute/project");
     let mut app = app_with_launch_workspace(workspace.clone());
     app.open_composer();
@@ -178,16 +179,18 @@ fn new_task_action_carries_the_selected_workspace() {
         model: None,
         prompt: "fix the parser".into(),
         cwd: workspace,
+        yolo: true,
     });
 }
 
 #[test]
-fn launch_with_cwd_uses_action_workspace_not_startup_default() {
-    let outcome = hub.launch_with_cwd(
+fn launch_with_options_uses_action_workspace_and_yolo_not_startup_defaults() {
+    let outcome = hub.launch_with_options(
         Provider::Hermes,
         None,
         "task".into(),
         PathBuf::from("/chosen/workspace"),
+        true,
     );
     assert_request_cwd(outcome, "/chosen/workspace");
 }
@@ -198,30 +201,40 @@ fn launch_with_cwd_uses_action_workspace_not_startup_default() {
 Run:
 
 ```bash
-cargo test --locked new_task_action_carries_the_selected_workspace
-cargo test --locked launch_with_cwd_uses_action_workspace_not_startup_default
+cargo test --locked new_task_action_carries_selected_workspace_and_yolo_intent
+cargo test --locked launch_with_options_uses_action_workspace_and_yolo_not_startup_defaults
 ```
 
-Expected: compilation fails because `AppAction::Launch` has no `cwd` and `launch_with_cwd` does not exist.
+Expected: compilation fails because `AppAction::Launch` has neither `cwd` nor `yolo`, and `launch_with_options` does not exist.
 
-- [ ] **Step 3: Thread `cwd` through App, ControlHub, and both terminal launch paths**
+- [ ] **Step 3: Thread `cwd` and `yolo` through App, ControlHub, and both terminal launch paths**
 
 Apply these signatures and retain existing validation/YOLO branches unchanged:
 
 ```rust
 // src/app.rs
-AppAction::Launch { provider, model, prompt, cwd: self.launch_cwd.clone() }
+AppAction::Launch {
+    provider,
+    model,
+    prompt,
+    cwd: self.launch_cwd.clone(),
+    yolo: self.yolo_armed,
+}
 
 // src/control.rs
-pub fn launch_with_cwd(
+pub fn launch_with_options(
     &self,
     provider: Provider,
     model: Option<String>,
     prompt: String,
     cwd: PathBuf,
+    yolo: bool,
 ) -> Result<ControlOutcome> {
     let request = LaunchRequest { provider, model: validate_model(model)?, prompt, cwd };
-    if self.yolo {
+    if yolo && !controller.supports_yolo() {
+        bail!("{} does not expose a verified permission-bypass mode", provider.label());
+    }
+    if yolo {
         controller.launch_yolo(&request)
     } else {
         controller.launch(&request)
@@ -229,13 +242,13 @@ pub fn launch_with_cwd(
 }
 ```
 
-Refactor `launch_with` and `launch_foreground_with` into wrappers that pass the startup workspace so their existing callers/tests remain valid. Extend `DashboardControl`, its `ControlHub` implementation, `LaunchJob`, `LaunchWorkerResult`, `schedule_launch`, and `dispatch_foreground_launch` to carry `cwd`. Do not read a mutable global cwd or change OAV's process directory.
+Refactor `launch_with` and `launch_foreground_with` into safe wrappers so existing callers/tests remain valid. Extend `DashboardControl`, its `ControlHub` implementation, `LaunchJob`, `LaunchWorkerResult`, `schedule_launch`, and `dispatch_foreground_launch` to carry both `cwd` and `yolo`. Remove the dashboard-wide `ControlHubConfig.yolo` policy: the controller sees only the exact launch option. Do not read a mutable global cwd or change OAV's process directory.
 
-At startup, load `Workspaces`, resolve `cli.launch_cwd` first; otherwise use `workspaces.startup_workspace()`; otherwise `std::env::current_dir()`. Validate the selected workspace before constructing `ControlHub`. Pass a clone of `Workspaces` into `run_dashboard`.
+At startup, load `Workspaces`, resolve `cli.launch_cwd` first; otherwise use `workspaces.startup_workspace()`; otherwise `std::env::current_dir()`. Validate the selected workspace before constructing `ControlHub`. Pass a clone of `Workspaces` and the initial `cli.yolo` armed value into `run_dashboard`/`App`; `--yolo` must not remain in `ControlHub` after startup.
 
 - [ ] **Step 4: Record only successful launches**
 
-For foreground launches, call `workspaces.record_successful_launch(&cwd)` only after `launch_foreground_session` returns `Ok`. For asynchronous launches, include `cwd` in `LaunchWorkerResult` and record it only in the `Ok(outcome)` receive branch. If persistence fails after a provider launch, leave the provider success intact, keep the chosen in-memory CWD, and show a notice that the workspace could not be remembered.
+For foreground launches, call `workspaces.record_successful_launch(&cwd)` and `app.consume_yolo_if(yolo)` only after `launch_foreground_session` returns `Ok`. For asynchronous launches, include `cwd` and `yolo` in `LaunchWorkerResult` and do both only in the `Ok(outcome)` receive branch. Failed/refused launches retain `yolo_armed`. If workspace persistence fails after a provider launch, leave the provider success intact, keep the chosen in-memory CWD, and show a notice that the workspace could not be remembered.
 
 After a successful store update, call an App method that replaces its picker list with `workspaces.list()`; no failed launch may mutate that list.
 
@@ -320,7 +333,7 @@ fn select_workspace_command(&mut self, argument: &str) -> AppAction;
 
 `/workspace` opens the picker; `/workspace /absolute/path` emits `AppAction::SelectWorkspace { cwd }`; the picker uses its own filter field, arrows/Tab move through newest-first choices, Enter emits the same action, and Esc returns to the composer with the task draft and active path unchanged. Empty remembered state shows a direct instruction to use `/workspace /absolute/path`; it never opens a filesystem browser.
 
-In the terminal event loop, handle `SelectWorkspace` before controller dispatch: call `workspaces.validate_selection`, then `app.set_launch_workspace` on success; on error set `workspace unavailable: …` and preserve the old choice. Update `ui.rs` to include `workspace <path>` in the new-task border title, render a picker matching the harness/model visual pattern, and expose `/workspace` in contextual help and footer. Do not bind Ctrl+W: it is already the portable delete-previous-word editing key.
+In the terminal event loop, handle `SelectWorkspace` before controller dispatch: call `workspaces.validate_selection`, then `app.set_launch_workspace` on success; on error set `workspace unavailable: …` and preserve the old choice. Update `ui.rs` to include `workspace <path>` in the new-task border title, render a picker matching the harness/model visual pattern with full absolute paths as its only row label, and expose `/workspace` in contextual help and footer. Do not bind Ctrl+W: it is already the portable delete-previous-word editing key.
 
 - [ ] **Step 4: Add a disposable real-PTY regression**
 
@@ -346,7 +359,87 @@ git add src/app.rs src/ui.rs src/terminal.rs tests/real_tty.rs
 git commit -m "feat: choose remembered launch workspaces"
 ```
 
-### Task 5: Enable Hermes-only verified YOLO launch
+### Task 5: Add and consume the one-session YOLO composer setting
+
+**Files:**
+- Modify: `src/app.rs:27-177, 430-535, 1250-1357`
+- Modify: `src/terminal.rs:450-572`
+- Modify: `src/ui.rs:412-531, 708-751, 883-949`
+- Modify: `src/main.rs:553-596`
+- Modify: `src/native_session.rs:131-207`
+- Modify: `src/adapters/native_owned.rs:19-96`
+- Test: inline `src/app.rs`, `src/terminal.rs`, and `src/ui.rs` tests
+
+- [ ] **Step 1: Write failing composer-state tests**
+
+```rust
+#[test]
+fn yolo_confirmation_arms_only_the_next_successful_launch() {
+    let mut app = app_with_launch_workspace(PathBuf::from("/work"));
+    app.open_composer();
+    app.input = "/yolo".into();
+    assert_eq!(app.activate(), AppAction::None);
+    assert_eq!(app.overlay, Overlay::Confirm(ConfirmTarget::EnableYolo));
+
+    app.confirm_yolo(true);
+    assert!(app.yolo_armed);
+    app.select_launch_provider("hermes");
+    app.select_launch_model("openai-codex/gpt-5.4-mini");
+    assert!(app.yolo_armed);
+
+    app.consume_yolo_if(true);
+    assert!(!app.yolo_armed);
+}
+
+#[test]
+fn yolo_disarms_without_confirmation_and_a_failed_launch_does_not_consume_it() {
+    let mut app = app_with_yolo_armed();
+    app.submit_new_session("task".into());
+    assert!(app.yolo_armed);
+    app.submit_new_session("/yolo".into());
+    assert!(!app.yolo_armed);
+}
+```
+
+- [ ] **Step 2: Run the tests to prove the composer capability is absent**
+
+Run:
+
+```bash
+cargo test --locked yolo_confirmation_arms_only_the_next_successful_launch
+cargo test --locked yolo_disarms_without_confirmation_and_a_failed_launch_does_not_consume_it
+```
+
+Expected: compilation fails because `EnableYolo`, `yolo_armed`, confirmation, and consumption behavior do not exist.
+
+- [ ] **Step 3: Implement the explicit confirm/disarm state machine**
+
+Add `ConfirmTarget::EnableYolo` and `yolo_armed: bool` to `App`. `/yolo` when false opens the ordinary confirm overlay with exact text `Enable YOLO for the next launched session? y/N`; `y`/Enter confirms, `n`/Esc cancels, and `/yolo` when true clears the bit directly. `--yolo` initializes that same bit during App construction. `/harness`, `/model`, `/workspace`, and draft edits do not alter it.
+
+Render `⚠ YOLO · next session only` in the composer title only while armed, alongside the current harness/model/workspace. Add `/yolo` to contextual help. Do not add a dashboard-wide warning or a persistent preference.
+
+- [ ] **Step 4: Preserve visibility on the created native session**
+
+Extend `OwnedNativeSession` in `src/adapters/native_owned.rs` with a serde-defaulted `yolo: bool`, pass it into `NativeOwnership::record`, and expose it when building an OAV-owned native row. Add a small `run_with_screen_steps_yolo` helper in `src/native_session.rs` that uses the existing warning plumbing and is selected only for an armed Hermes launch. The warning must survive OAV's background/re-entry route for the retained frontend; safe session records and old ownership JSON default to `false`.
+
+- [ ] **Step 5: Consume only after the exact launch succeeds**
+
+In the foreground and asynchronous terminal paths, call `app.consume_yolo_if(yolo)` only after the controller returns `Ok(ControlOutcome)`. A missing controller, unsupported harness, validation failure, provider exit, or discovery/correlation failure leaves the composer armed so the user can correct and retry. Add terminal tests that exercise both success and refusal.
+
+- [ ] **Step 6: Run focused checks and commit**
+
+```bash
+cargo test --locked yolo_
+cargo test --locked app::tests
+cargo test --locked terminal::tests
+cargo fmt --all -- --check
+git add src/app.rs src/terminal.rs src/ui.rs src/main.rs src/native_session.rs src/adapters/native_owned.rs
+git commit -m "feat: arm YOLO for one launch"
+```
+
+Expected: YOLO is safe-by-default after every successful launch, without losing a failed launch's armed state.
+
+### Task 6: Enable Hermes-only verified YOLO launch
 
 **Files:**
 - Modify: `src/adapters/session_migrate_native.rs:197-301, 321-326, 723-800, 1542-1575`
@@ -359,7 +452,7 @@ Split the existing mixed native-command assertion so Hermes has an exact positiv
 
 ```rust
 #[test]
-fn hermes_yolo_is_global_and_safe_launch_omits_it() {
+fn hermes_yolo_armed_launch_uses_global_cli_flag_and_safe_launch_omits_it() {
     let workspace = tempfile::tempdir().unwrap();
     let request = LaunchRequest {
         provider: Provider::Hermes,
@@ -422,11 +515,11 @@ Provider::Hermes => {
 }
 ```
 
-Change `supports_yolo` to include `Provider::Hermes` and change the SQLite foreground launch guard from blanket `if yolo { bail!(...) }` to permit `Provider::Hermes` only. Hermes must still use `run_with_screen_steps` so its ready marker, bracketed-paste prompt injection, database correlation, ownership write, and background/resume semantics remain exactly the same. Preserve explicit refusal for MastraCode and Devin; do not add a generic `sqlite supports yolo` rule.
+Change `supports_yolo` to include `Provider::Hermes` and change the SQLite foreground launch guard from blanket `if yolo { bail!(...) }` to permit `Provider::Hermes` only. An armed Hermes launch must use `run_with_screen_steps_yolo` so its ready marker, bracketed-paste prompt injection, database correlation, ownership write, warning, and background/resume semantics remain exactly the same. Preserve explicit refusal for MastraCode and Devin; do not add a generic `sqlite supports yolo` rule.
 
 - [ ] **Step 4: Add a disposable foreground regression and run focused checks**
 
-Extend the existing Hermes native fixture/probe to record argv and run an OAV `--yolo` foreground launch. Assert the fixture receives `--yolo`, the OAV UI warning remains visible, a prompt is injected only after Hermes readiness, the owned session is discovered in the selected workspace, and returning/backgrounding preserves the exact session. Run:
+Extend the existing Hermes native fixture/probe to record argv and run an OAV `--yolo` pre-armed foreground launch. Assert the composer starts armed, the fixture receives `--yolo` for that first launch only, the retained native warning remains visible, a prompt is injected only after Hermes readiness, the owned session is discovered in the selected workspace, and returning/backgrounding preserves the exact session. Assert the next composer task is unarmed.
 
 ```bash
 cargo test --locked adapters::session_migrate_native::tests
@@ -442,7 +535,7 @@ git add src/adapters/session_migrate_native.rs src/control.rs tests/real_tty.rs
 git commit -m "feat: support Hermes YOLO launches"
 ```
 
-### Task 6: Document the exact behavior and run the release-quality gate
+### Task 7: Document the exact behavior and run the release-quality gate
 
 **Files:**
 - Modify: `README.md:85-92, 164-181`
@@ -458,12 +551,14 @@ Add/update deterministic assertions so public docs contain all of:
 
 ```text
 Hermes Agent | --yolo
+/yolo
+next session only
 /workspace
 remembered workspaces
 --launch-cwd
 ```
 
-Assert that docs still name MastraCode as unsupported for YOLO and describe `--yolo` as explicit opt-in for new sessions only.
+Assert that docs still name MastraCode as unsupported for YOLO and describe both `--yolo` and `/yolo` as an explicit opt-in for one new session only.
 
 - [ ] **Step 2: Run doc/metadata tests to prove required text is absent or stale**
 
@@ -477,7 +572,7 @@ Expected: the test identifies the missing Hermes mapping and workspace command b
 
 - [ ] **Step 3: Update operator documentation without widening claims**
 
-Document `hermes --yolo chat --cli` as the mapping OAV uses; say it bypasses Hermes dangerous-command approvals and is disabled by default. Document `/workspace`, `/workspace /absolute/path`, newest-first persistence after successful launches only, restart default, and one-run `--launch-cwd` precedence. Do not claim a filesystem browser, labels, sync, automatic scanning, or authenticated provider validation.
+Document `hermes --yolo chat --cli` as the mapping OAV uses; say it bypasses Hermes dangerous-command approvals and is disabled by default. Document that `--yolo` pre-arms the next session and `/yolo` asks `Enable YOLO for the next launched session? y/N`; confirmation survives launch-option changes and failed launches, then is consumed by success. Document `/workspace`, `/workspace /absolute/path`, newest-first persistence after successful launches only, restart default, and one-run `--launch-cwd` precedence. Do not claim a filesystem browser, labels, sync, automatic scanning, or authenticated provider validation.
 
 - [ ] **Step 4: Run focused documentation and full code gates serially**
 
@@ -510,5 +605,5 @@ Expected: the feature branch is clean, contains focused commits, and has no dire
 
 - [ ] Verify all feature commits are pushed to a branch based on the current `origin/main`.
 - [ ] Run an independent cross-family review on the exact pushed tip; its coverage matrix must include safe vs YOLO Hermes argv, unsupported-provider refusal, workspace state-file security, failure-no-save behavior, picker escape/filter ordering, startup precedence, and both background/foreground launch paths.
-- [ ] Resolve every blocking review finding, rerun the affected focused tests, then rerun the complete Task 6 gate once.
+- [ ] Resolve every blocking review finding, rerun the affected focused tests, then rerun the complete Task 7 gate once.
 - [ ] Open a PR from the fork to `xhluca/open-agent-view:main` with `Refs #3` only if upstream issue #3 remains the relevant tracking issue; otherwise describe both features without claiming it closes an unrelated issue. Do not merge without Radan's explicit per-PR authorization.
