@@ -124,6 +124,8 @@ struct OwnedAntigravityConversation {
     workspace: PathBuf,
     conversation_id: String,
     created_at_ms: u64,
+    #[serde(default)]
+    yolo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
 }
@@ -154,7 +156,10 @@ pub struct AntigravityOwnership {
 
 impl AntigravityOwnership {
     pub fn load_default() -> Result<Arc<Self>> {
-        let path = default_antigravity_ownership_path()?;
+        Self::load(default_antigravity_ownership_path()?)
+    }
+
+    pub fn load(path: PathBuf) -> Result<Arc<Self>> {
         reject_symlink(&path)?;
         reject_insecure_registry_permissions(&path)?;
         let records = match fs::read_to_string(&path) {
@@ -194,6 +199,16 @@ impl AntigravityOwnership {
         conversation_id: &str,
         name: Option<&str>,
     ) -> Result<()> {
+        self.record_named_with_yolo(workspace, conversation_id, name, false)
+    }
+
+    fn record_named_with_yolo(
+        &self,
+        workspace: &Path,
+        conversation_id: &str,
+        name: Option<&str>,
+        yolo: bool,
+    ) -> Result<()> {
         let mut records = self
             .records
             .lock()
@@ -214,6 +229,7 @@ impl AntigravityOwnership {
                 .as_ref()
                 .map(|record| record.created_at_ms)
                 .unwrap_or_else(now_millis),
+            yolo,
             name: name
                 .map(str::to_owned)
                 .or_else(|| previous.and_then(|record| record.name)),
@@ -463,20 +479,34 @@ fn owned_antigravity_session(
         } else {
             SessionState::Completed
         },
-        summary: transcript
-            .as_ref()
-            .and_then(|transcript| transcript.summary.clone())
-            .unwrap_or_else(|| {
-                if backgrounded {
-                    "Antigravity native session is backgrounded".into()
-                } else {
-                    "Antigravity conversation completed".into()
-                }
-            }),
-        raw_state: Some(if backgrounded {
-            "native_backgrounded".into()
-        } else {
-            "owned_conversation".into()
+        summary: {
+            let summary = transcript
+                .as_ref()
+                .and_then(|transcript| transcript.summary.clone())
+                .unwrap_or_else(|| {
+                    if backgrounded {
+                        "Antigravity native session is backgrounded".into()
+                    } else {
+                        "Antigravity conversation completed".into()
+                    }
+                });
+            if record.yolo {
+                format!("⚠ YOLO · {summary}")
+            } else {
+                summary
+            }
+        },
+        raw_state: Some({
+            let lifecycle = if backgrounded {
+                "native_backgrounded"
+            } else {
+                "owned_conversation"
+            };
+            if record.yolo {
+                format!("{lifecycle}; YOLO")
+            } else {
+                lifecycle.into()
+            }
         }),
         pid: None,
         started_at: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(record.created_at_ms)),
@@ -835,6 +865,7 @@ impl AntigravityController {
             task_name,
             launch_key: launch_key.clone(),
             before,
+            yolo,
             ownership: ownership.clone(),
             cancelled: cancelled.clone(),
             sender: conversation_tx,
@@ -1112,6 +1143,7 @@ struct AntigravityConversationMonitor {
     task_name: String,
     launch_key: String,
     before: Option<String>,
+    yolo: bool,
     ownership: Arc<AntigravityOwnership>,
     cancelled: Arc<AtomicBool>,
     sender: mpsc::SyncSender<Result<String>>,
@@ -1128,6 +1160,7 @@ fn monitor_new_conversation(monitor: AntigravityConversationMonitor) -> thread::
             task_name,
             launch_key,
             before,
+            yolo,
             ownership,
             cancelled,
             sender,
@@ -1141,7 +1174,7 @@ fn monitor_new_conversation(monitor: AntigravityConversationMonitor) -> thread::
                         .unwrap_or(false);
                     if matches_prompt {
                         let result = ownership
-                            .record_named(&cwd, current, Some(&task_name))
+                            .record_named_with_yolo(&cwd, current, Some(&task_name), yolo)
                             .map(|()| current.clone());
                         if result.is_ok() {
                             ownership.complete(&launch_key);
@@ -1158,7 +1191,7 @@ fn monitor_new_conversation(monitor: AntigravityConversationMonitor) -> thread::
             if let Ok(Some(current)) = cached_conversation(&path, &cwd) {
                 if before.as_deref() != Some(current.as_str()) {
                     let result = ownership
-                        .record_named(&cwd, &current, Some(&task_name))
+                        .record_named_with_yolo(&cwd, &current, Some(&task_name), yolo)
                         .map(|()| current);
                     if result.is_ok() {
                         ownership.complete(&launch_key);
@@ -1261,6 +1294,8 @@ fn reject_insecure_registry_permissions(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
 
@@ -1447,6 +1482,34 @@ mod tests {
         assert_eq!(sessions[0].kind, SessionKind::Managed);
     }
 
+    #[test]
+    fn antigravity_legacy_state_defaults_safe_and_yolo_survives_restart_with_visible_marker() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        fs::write(
+            &path,
+            r#"[{"workspace":"/work","conversationId":"legacy","createdAtMs":1}]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let legacy = AntigravityOwnership::load(path.clone()).unwrap();
+        assert!(!legacy.records()[0].yolo);
+
+        legacy
+            .record_named_with_yolo(Path::new("/work"), "owned", Some("Parser"), true)
+            .unwrap();
+        let restarted = AntigravityOwnership::load(path).unwrap();
+        let record = restarted
+            .records()
+            .into_iter()
+            .find(|record| record.conversation_id == "owned")
+            .unwrap();
+        let session = owned_antigravity_session(&record, Path::new("/missing"));
+        assert!(session.summary.starts_with("⚠ YOLO ·"));
+        assert!(session.raw_state.unwrap().contains("YOLO"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn ownership_registry_rejects_symlinks_and_public_permissions() {
@@ -1587,6 +1650,7 @@ mod tests {
             task_name: "task".into(),
             launch_key: "antigravity:new:test".into(),
             before: Some("before".into()),
+            yolo: false,
             ownership: ownership.clone(),
             cancelled,
             sender,
@@ -1639,6 +1703,7 @@ mod tests {
             task_name: "live task".into(),
             launch_key: launch_key.into(),
             before: None,
+            yolo: false,
             ownership: ownership.clone(),
             cancelled,
             sender,

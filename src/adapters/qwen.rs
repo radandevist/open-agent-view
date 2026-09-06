@@ -72,6 +72,8 @@ struct OwnedQwenSession {
     cwd: PathBuf,
     created_at_ms: u64,
     name: String,
+    #[serde(default)]
+    yolo: bool,
 }
 
 /// Private record of the exact UUIDs allocated by OAV through Qwen Code's
@@ -130,6 +132,16 @@ impl QwenOwnership {
     }
 
     fn record(&self, session_id: &str, cwd: &Path, name: &str) -> Result<()> {
+        self.record_with_yolo(session_id, cwd, name, false)
+    }
+
+    fn record_with_yolo(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        name: &str,
+        yolo: bool,
+    ) -> Result<()> {
         let mut records = self
             .records
             .lock()
@@ -141,6 +153,7 @@ impl QwenOwnership {
             cwd: cwd.to_owned(),
             created_at_ms: now_millis(),
             name: name.into(),
+            yolo,
         });
         persist_private_registry(&self.path, &next)?;
         *records = next;
@@ -253,6 +266,11 @@ impl SessionSource for QwenSource {
             .iter()
             .map(|record| record.session_id.clone())
             .collect::<BTreeSet<_>>();
+        let yolo_ids = owned_records
+            .iter()
+            .filter(|record| record.yolo)
+            .map(|record| record.session_id.clone())
+            .collect::<BTreeSet<_>>();
         let live = match self.live() {
             Ok(records) => records,
             Err(error) => {
@@ -287,6 +305,13 @@ impl SessionSource for QwenSource {
             let started_at =
                 active.map(|record| UNIX_EPOCH + Duration::from_millis(record.started_at));
             discovered_ids.insert(record.session_id.clone());
+            let yolo = yolo_ids.contains(&record.session_id);
+            let summary = summarize(&record.prompt, 160);
+            let summary = if yolo {
+                format!("⚠ YOLO · {summary}")
+            } else {
+                summary
+            };
             sessions.push(AgentSession {
                 id: format!("qwen:host:{}", record.session_id),
                 provider_session_id: record.session_id,
@@ -308,8 +333,15 @@ impl SessionSource for QwenSource {
                 } else {
                     SessionState::Completed
                 },
-                summary: summarize(&record.prompt, 160),
-                raw_state: Some(if active.is_some() { "running" } else { "saved" }.into()),
+                summary,
+                raw_state: Some({
+                    let lifecycle = if active.is_some() { "running" } else { "saved" };
+                    if yolo {
+                        format!("{lifecycle}; YOLO")
+                    } else {
+                        lifecycle.into()
+                    }
+                }),
                 pid: active.map(|record| record.pid),
                 started_at,
                 updated_at,
@@ -343,15 +375,23 @@ impl SessionSource for QwenSource {
                 } else {
                     SessionState::Completed
                 },
-                summary: owned.name,
-                raw_state: Some(
-                    if backgrounded {
+                summary: if owned.yolo {
+                    format!("⚠ YOLO · {}", owned.name)
+                } else {
+                    owned.name.clone()
+                },
+                raw_state: Some({
+                    let lifecycle = if backgrounded {
                         "backgrounded; awaiting Qwen history"
                     } else {
                         "owned; awaiting Qwen history"
+                    };
+                    if owned.yolo {
+                        format!("{lifecycle}; YOLO")
+                    } else {
+                        lifecycle.into()
                     }
-                    .into(),
-                ),
+                }),
                 pid: None,
                 started_at: Some(UNIX_EPOCH + Duration::from_millis(owned.created_at_ms)),
                 updated_at: Some(UNIX_EPOCH + Duration::from_millis(owned.created_at_ms)),
@@ -411,8 +451,12 @@ impl QwenController {
         // spawn error or immediate non-zero exit therefore leaves no stale
         // ownership claim.
         if let Err(error) =
-            self.ownership
-                .record(&session_id, &request.cwd, &summarize(&request.prompt, 48))
+            self.ownership.record_with_yolo(
+                &session_id,
+                &request.cwd,
+                &summarize(&request.prompt, 48),
+                yolo,
+            )
         {
             if crate::native_session::is_backgrounded(&launch_key) {
                 let _ = crate::native_session::terminate(&launch_key);
@@ -840,6 +884,40 @@ mod tests {
                 "fix the parser",
             ]
         );
+    }
+
+    #[test]
+    fn qwen_legacy_state_defaults_safe_and_yolo_survives_restart_with_visible_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.json");
+        fs::write(
+            &path,
+            r#"[{"sessionId":"legacy","cwd":"/work","createdAtMs":1,"name":"Legacy"}]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let legacy = QwenOwnership::load(path.clone()).unwrap();
+        assert!(!legacy.snapshot()[0].yolo);
+
+        legacy
+            .record_with_yolo(
+                "11111111-2222-4333-8444-555555555555",
+                Path::new("/work"),
+                "Parser work",
+                true,
+            )
+            .unwrap();
+        let restarted = QwenOwnership::load(path).unwrap();
+        let source = QwenSource::with_runner("qwen", restarted, Arc::new(FakeRunner));
+        let session = source
+            .discover(&DiscoveryRequest::default())
+            .unwrap()
+            .into_iter()
+            .find(|session| session.provider_session_id.starts_with("11111111"))
+            .unwrap();
+        assert!(session.summary.starts_with("⚠ YOLO ·"));
+        assert!(session.raw_state.unwrap().contains("YOLO"));
     }
 
     #[test]

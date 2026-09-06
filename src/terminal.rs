@@ -312,20 +312,21 @@ pub fn run_dashboard(
             match launch_rx.try_recv() {
                 Ok(completed) => {
                     completed_launch_needs_refresh = true;
-                                    if completed.sequence == latest_launch_sequence {
-                                        launching_provider = None;
-                                        match completed.result {
-                                            Ok(outcome) => {
-                                                if completed.yolo {
-                                                    app.disarm_yolo();
-                                                }
-                                                let workspace_error =
-                                                    record_successful_workspace_for_control(
-                                                        &mut app,
-                                                        &workspaces,
-                                                        &completed.cwd,
-                                                    );
-                                                app.set_notice(if let Some(error) = workspace_error {
+                    account_yolo_launch_result(&mut app, &completed);
+                    let workspace_error = if completed.result.is_ok() {
+                        Some(record_successful_workspace_for_control(
+                            &mut app,
+                            &workspaces,
+                            &completed.cwd,
+                        ))
+                    } else {
+                        None
+                    };
+                    if completed.sequence == latest_launch_sequence {
+                        launching_provider = None;
+                        match completed.result {
+                            Ok(outcome) => {
+                                app.set_notice(if let Some(Some(error)) = workspace_error {
                                                     format!(
                                                         "{}; workspace history not saved: {error}",
                                                         outcome.message
@@ -580,6 +581,18 @@ pub fn run_dashboard(
                                     ));
                                     continue;
                                 }
+                                latest_launch_sequence = latest_launch_sequence.wrapping_add(1);
+                                let yolo_reservation = if yolo {
+                                    if !app.reserve_yolo(latest_launch_sequence) {
+                                        app.set_notice(
+                                            "another YOLO launch is already in progress; wait for it to finish",
+                                        );
+                                        continue;
+                                    }
+                                    Some(latest_launch_sequence)
+                                } else {
+                                    None
+                                };
                                 match control.launch_presentation(&provider) {
                                 Ok(LaunchPresentation::Foreground) => {
                                     app.set_notice(format!(
@@ -595,6 +608,7 @@ pub fn run_dashboard(
                                         prompt,
                                         cwd,
                                         yolo,
+                                        yolo_reservation,
                                         control,
                                         &workspaces,
                                     )
@@ -604,7 +618,6 @@ pub fn run_dashboard(
                                     | LaunchPresentation::DeferredForeground),
                                 ) => {
                                     let known_session_ids = provider_session_ids(&app, &provider);
-                                    latest_launch_sequence = latest_launch_sequence.wrapping_add(1);
                                     launching_provider = Some(provider.clone());
                                     launch_animation_tick = 0;
                                     next_launch_animation = Instant::now();
@@ -627,6 +640,9 @@ pub fn run_dashboard(
                                     ActionEffect::default()
                                 }
                                 Err(error) => {
+                                    if let Some(token) = yolo_reservation {
+                                        app.finish_yolo_reservation(token, false);
+                                    }
                                     app.set_notice(format!("launch failed: {error:#}"));
                                     ActionEffect::default()
                                 }
@@ -866,6 +882,12 @@ fn schedule_launch_job(
     });
 }
 
+fn account_yolo_launch_result(app: &mut App, completed: &LaunchWorkerResult) {
+    if completed.yolo {
+        app.finish_yolo_reservation(completed.sequence, completed.result.is_ok());
+    }
+}
+
 fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     terminal: &mut T,
     app: &mut App,
@@ -874,11 +896,24 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
     prompt: String,
     cwd: std::path::PathBuf,
     yolo: bool,
+    yolo_reservation: Option<u64>,
     control: &C,
     workspaces: &WorkspaceRegistry,
 ) -> ActionEffect {
+    let yolo_reservation = if yolo {
+        let token = yolo_reservation.unwrap_or(0);
+        if yolo_reservation.is_none() {
+            app.reserve_yolo(token);
+        }
+        Some(token)
+    } else {
+        None
+    };
     let known_session_ids = provider_session_ids(app, &provider);
     if let Err(error) = terminal.suspend_dashboard() {
+        if let Some(token) = yolo_reservation {
+            app.finish_yolo_reservation(token, false);
+        }
         app.set_notice(format!("failed to suspend dashboard: {error:#}"));
         return ActionEffect::default();
     }
@@ -892,21 +927,26 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
         yolo,
     );
     let resume = terminal.resume_dashboard();
-    match (result, resume) {
-        (Ok(outcome), Ok(())) => {
+    let resume_succeeded = resume.is_ok();
+    match result {
+        Ok(outcome) => {
             let workspace_error =
                 record_successful_workspace_for_control(app, workspaces, &cwd);
-            if yolo {
-                app.disarm_yolo();
+            if let Some(token) = yolo_reservation {
+                app.finish_yolo_reservation(token, true);
             }
-            app.set_notice(if let Some(error) = workspace_error {
+            let mut message = if let Some(error) = workspace_error {
                 format!(
                     "{}; workspace history not saved: {error}",
                     outcome.message
                 )
             } else {
                 outcome.message
-            });
+            };
+            if let Err(error) = resume {
+                message.push_str(&format!("; failed to restore dashboard: {error:#}"));
+            }
+            app.set_notice(message);
             ActionEffect {
                 refresh: true,
                 pending_launch: outcome.provider_session_hint.map(|provider_session_id| {
@@ -919,22 +959,29 @@ fn dispatch_foreground_launch<T: DashboardTerminal, C: DashboardControl>(
                 ..ActionEffect::default()
             }
         }
-        (Err(error), Ok(())) => {
+        Err(error) => {
+            if let Some(token) = yolo_reservation {
+                app.finish_yolo_reservation(token, false);
+            }
             let error = format!("{error:#}");
-            if control.supports_authentication(&provider) && looks_like_authentication_error(&error)
-            {
-                app.require_authentication(provider, retry_model, retry_prompt, error);
-            } else {
-                app.set_notice(format!("launch failed: {error}"));
+            match resume {
+                Ok(()) => {
+                    if control.supports_authentication(&provider)
+                        && looks_like_authentication_error(&error)
+                    {
+                        app.require_authentication(provider, retry_model, retry_prompt, error);
+                    } else {
+                        app.set_notice(format!("launch failed: {error}"));
+                    }
+                }
+                Err(resume_error) => app.set_notice(format!(
+                    "launch failed: {error}; failed to restore dashboard: {resume_error:#}"
+                )),
             }
             ActionEffect {
-                refresh: true,
+                refresh: resume_succeeded,
                 ..ActionEffect::default()
             }
-        }
-        (_, Err(error)) => {
-            app.set_notice(format!("failed to restore dashboard: {error:#}"));
-            ActionEffect::default()
         }
     }
 }
@@ -1129,10 +1176,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
 
     match key.code {
         KeyCode::Esc => app.escape(),
-        KeyCode::Char('y') if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) => {
-            app.activate()
+        KeyCode::Char('y' | 'Y')
+            if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) =>
+        {
+            app.arm_yolo();
+            AppAction::None
         }
-        KeyCode::Char('n') if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) => {
+        KeyCode::Char('n' | 'N') | KeyCode::Enter
+            if app.overlay == Overlay::Confirm(crate::app::ConfirmTarget::Yolo) =>
+        {
             app.yolo_selection_cancelled();
             AppAction::None
         }
@@ -1920,7 +1972,7 @@ mod tests {
 
     use crossterm::event::KeyEventKind;
 
-    use crate::app::{ComposerMode, SelectionKey};
+    use crate::app::{ComposerMode, ConfirmTarget, SelectionKey};
     use crate::domain::{
         AgentSession, Capability, LaunchTarget, Provider, Runtime, SessionKind, SessionSnapshot,
         SessionState,
@@ -2304,6 +2356,67 @@ mod tests {
             }
         );
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn yolo_confirmation_arms_only_for_explicit_y_or_uppercase_y() {
+        for (code, expected_armed) in [
+            (KeyCode::Enter, false),
+            (KeyCode::Char('n'), false),
+            (KeyCode::Char('N'), false),
+            (KeyCode::Esc, false),
+            (KeyCode::Char('y'), true),
+            (KeyCode::Char('Y'), true),
+        ] {
+            let mut app = app();
+            app.start_new_session(None);
+            app.input = "/yolo".into();
+            assert_eq!(app.activate(), AppAction::None);
+            assert_eq!(app.overlay, Overlay::Confirm(ConfirmTarget::Yolo));
+
+            assert_eq!(handle_key(&mut app, key(code)), AppAction::None);
+            assert_eq!(app.yolo, expected_armed, "key {code:?}");
+            assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+        }
+    }
+
+    #[test]
+    fn reversed_launch_completion_cannot_restore_or_capture_another_yolo_job() {
+        let mut app = app();
+        app.set_yolo(true, BTreeSet::from([Provider::Pi]));
+        assert!(app.reserve_yolo(1));
+        assert!(!app.reserve_yolo(2));
+
+        let ordinary = LaunchWorkerResult {
+            sequence: 2,
+            provider: Provider::Pi,
+            model: None,
+            prompt: "ordinary".into(),
+            cwd: PathBuf::from("/work/ordinary"),
+            yolo: false,
+            open_when_visible: false,
+            known_session_ids: BTreeSet::new(),
+            result: Ok(ControlOutcome {
+                message: "ordinary done".into(),
+                provider_session_hint: None,
+            }),
+        };
+        account_yolo_launch_result(&mut app, &ordinary);
+        assert!(!app.yolo);
+
+        let reserved = LaunchWorkerResult {
+            sequence: 1,
+            provider: Provider::Pi,
+            model: None,
+            prompt: "reserved".into(),
+            cwd: PathBuf::from("/work/reserved"),
+            yolo: true,
+            open_when_visible: false,
+            known_session_ids: BTreeSet::new(),
+            result: Err("reserved launch failed".into()),
+        };
+        account_yolo_launch_result(&mut app, &reserved);
+        assert!(app.yolo);
     }
 
     #[test]
@@ -2940,6 +3053,7 @@ mod tests {
             "build".into(),
             directory.path().to_owned(),
             false,
+            None,
             &control,
             &registry,
         );
@@ -2963,6 +3077,7 @@ mod tests {
         let registry = WorkspaceRegistry::load(directory.path().join("workspaces.json")).unwrap();
         let mut app = app();
         app.set_yolo(true, BTreeSet::from([Provider::Pi]));
+        assert!(app.reserve_yolo(1));
         let mut terminal = FakeTerminal::default();
         let control = FakeControl {
             fail_on: Some("launch"),
@@ -2977,6 +3092,7 @@ mod tests {
             "build".into(),
             directory.path().to_owned(),
             true,
+            Some(1),
             &control,
             &registry,
         );
@@ -2984,6 +3100,44 @@ mod tests {
         assert!(app.yolo);
         assert!(app.remembered_workspaces.is_empty());
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn successful_foreground_launch_is_accounted_before_dashboard_resume_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let registry = WorkspaceRegistry::load(directory.path().join("workspaces.json")).unwrap();
+        let mut app = app();
+        app.set_yolo(true, BTreeSet::from([Provider::Pi]));
+        assert!(app.reserve_yolo(1));
+        let mut terminal = FakeTerminal {
+            resume_error: true,
+            ..FakeTerminal::default()
+        };
+        let control = FakeControl::default();
+
+        dispatch_foreground_launch(
+            &mut terminal,
+            &mut app,
+            Provider::Pi,
+            None,
+            "build".into(),
+            directory.path().to_owned(),
+            true,
+            Some(1),
+            &control,
+            &registry,
+        );
+
+        assert!(!app.yolo);
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(app.remembered_workspaces.len(), 1);
+        assert!(app.notice.as_deref().unwrap().contains("failed to restore dashboard"));
     }
 
     #[test]

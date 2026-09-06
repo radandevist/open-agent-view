@@ -159,6 +159,7 @@ pub struct App {
     pub launch_cwd: PathBuf,
     pub yolo: bool,
     pub yolo_supported_providers: BTreeSet<Provider>,
+    yolo_reservation: Option<u64>,
     pub harness_selection: usize,
     pub available_models: Vec<String>,
     pub model_filter: String,
@@ -235,6 +236,7 @@ impl App {
             launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             yolo: false,
             yolo_supported_providers: BTreeSet::new(),
+            yolo_reservation: None,
             harness_selection,
             available_models: Vec::new(),
             model_filter: String::new(),
@@ -271,6 +273,7 @@ impl App {
     pub fn set_yolo(&mut self, enabled: bool, supported_providers: BTreeSet<Provider>) {
         self.yolo = enabled;
         self.yolo_supported_providers = supported_providers;
+        self.yolo_reservation = None;
     }
 
     pub fn set_launch_cwd(&mut self, cwd: PathBuf) {
@@ -329,6 +332,33 @@ impl App {
 
     pub fn disarm_yolo(&mut self) {
         self.yolo = false;
+    }
+
+    pub fn arm_yolo(&mut self) {
+        if self.yolo_reservation.is_none() {
+            self.yolo = true;
+        }
+        self.overlay = Overlay::Composer(ComposerMode::NewSession);
+        self.notice = None;
+    }
+
+    pub fn reserve_yolo(&mut self, token: u64) -> bool {
+        if self.yolo && self.yolo_reservation.is_none() {
+            self.yolo = false;
+            self.yolo_reservation = Some(token);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn finish_yolo_reservation(&mut self, token: u64, succeeded: bool) {
+        if self.yolo_reservation == Some(token) {
+            self.yolo_reservation = None;
+            if !succeeded {
+                self.yolo = true;
+            }
+        }
     }
 
     pub fn replace_snapshot(&mut self, snapshot: SessionSnapshot) {
@@ -1380,7 +1410,6 @@ impl App {
             ConfirmTarget::Hide { session_ids } => AppAction::Hide { session_ids },
             ConfirmTarget::Group { session_ids, .. } => AppAction::Delete { session_ids },
             ConfirmTarget::Yolo => {
-                self.yolo = true;
                 self.overlay = Overlay::Composer(ComposerMode::NewSession);
                 AppAction::None
             }
@@ -3319,7 +3348,7 @@ mod tests {
     }
 
     #[test]
-    fn yolo_confirmation_arms_disarms_and_carries_exact_cwd_on_launch() {
+    fn yolo_confirmation_does_not_arm_through_generic_activation() {
         let cwd = PathBuf::from("/work/exact");
         let mut app = App::new(SessionSnapshot::default());
         app.set_launch_cwd(cwd.clone());
@@ -3330,8 +3359,10 @@ mod tests {
         assert_eq!(app.yolo, false);
 
         assert_eq!(app.activate(), AppAction::None);
-        assert!(app.yolo);
+        assert!(!app.yolo);
         assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+
+        app.yolo = true;
 
         app.input = "safe-looking task".into();
         assert_eq!(

@@ -63,6 +63,8 @@ struct OwnedVibeSession {
     cwd: PathBuf,
     created_at_ms: u64,
     name: String,
+    #[serde(default)]
+    yolo: bool,
 }
 
 pub struct MistralVibeOwnership {
@@ -97,6 +99,17 @@ impl MistralVibeOwnership {
             .unwrap_or(false)
     }
 
+    fn is_yolo(&self, session_id: &str) -> bool {
+        self.records
+            .lock()
+            .map(|records| {
+                records
+                    .iter()
+                    .any(|record| record.session_id == session_id && record.yolo)
+            })
+            .unwrap_or(false)
+    }
+
     fn recorded_cwd(&self, session_id: &str) -> Option<PathBuf> {
         self.records.lock().ok().and_then(|records| {
             records
@@ -107,6 +120,16 @@ impl MistralVibeOwnership {
     }
 
     fn record(&self, session: &VibeSession, fallback_cwd: &Path, name: &str) -> Result<()> {
+        self.record_with_yolo(session, fallback_cwd, name, false)
+    }
+
+    fn record_with_yolo(
+        &self,
+        session: &VibeSession,
+        fallback_cwd: &Path,
+        name: &str,
+        yolo: bool,
+    ) -> Result<()> {
         let mut records = self
             .records
             .lock()
@@ -121,6 +144,7 @@ impl MistralVibeOwnership {
                 .unwrap_or_else(|| fallback_cwd.to_owned()),
             created_at_ms: session.created_at,
             name: name.into(),
+            yolo,
         });
         persist_private_registry(&self.path, &next)?;
         *records = next;
@@ -331,8 +355,9 @@ impl SessionSource for MistralVibeSource {
             })
             .filter_map(|session| {
                 let owned = self.ownership.owns(&session.id);
+                let yolo = owned && self.ownership.is_yolo(&session.id);
                 let recorded_cwd = self.ownership.recorded_cwd(&session.id);
-                normalize_session(session, recorded_cwd.as_deref(), owned)
+                normalize_session(session, recorded_cwd.as_deref(), owned, yolo)
             })
             .collect::<Vec<_>>();
         sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
@@ -616,7 +641,7 @@ fn launch_mistral_vibe(
     if let Err(error) =
         controller
             .ownership
-            .record(&session, &request.cwd, &summarize(&request.prompt, 48))
+            .record_with_yolo(&session, &request.cwd, &summarize(&request.prompt, 48), yolo)
     {
         if matches!(
             native_exit,
@@ -670,6 +695,7 @@ fn normalize_session(
     session: VibeSession,
     recorded_cwd: Option<&Path>,
     owned: bool,
+    yolo: bool,
 ) -> Option<AgentSession> {
     let state = state(&session.status);
     let raw_state = match &session.status {
@@ -697,6 +723,12 @@ fn normalize_session(
         .cwd
         .clone()
         .or_else(|| recorded_cwd.map(Path::to_path_buf))?;
+    let summary = summarize(status_summary.unwrap_or(&session.preview), 160);
+    let summary = if yolo {
+        format!("⚠ YOLO · {summary}")
+    } else {
+        summary
+    };
     Some(AgentSession {
         id: format!("mistral_vibe:host:{}", session.id),
         provider_session_id: session.id,
@@ -710,8 +742,12 @@ fn normalize_session(
         name,
         cwd,
         state,
-        summary: summarize(status_summary.unwrap_or(&session.preview), 160),
-        raw_state: Some(raw_state.into()),
+        summary,
+        raw_state: Some(if yolo {
+            format!("{raw_state}; YOLO")
+        } else {
+            raw_state.into()
+        }),
         pid: None,
         started_at: Some(UNIX_EPOCH + Duration::from_millis(session.created_at)),
         updated_at: Some(UNIX_EPOCH + Duration::from_millis(session.updated_at)),
@@ -990,6 +1026,8 @@ mod tests {
     use super::*;
     use crate::test_support::tempfile;
     use std::collections::VecDeque;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     struct FakeRpc {
         sessions: Vec<VibeSession>,
@@ -1056,6 +1094,43 @@ mod tests {
         assert!(yolo.get_envs().any(|(key, value)| {
             key == "VIBE_ACTIVE_MODEL" && value == Some(std::ffi::OsStr::new("devstral"))
         }));
+    }
+
+    #[test]
+    fn mistral_vibe_legacy_state_defaults_safe_and_yolo_survives_restart_with_visible_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned.json");
+        fs::write(
+            &path,
+            r#"[{"sessionId":"legacy","cwd":"/work","createdAtMs":1,"name":"Legacy"}]"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let legacy = MistralVibeOwnership::load(path.clone()).unwrap();
+        assert!(!legacy.is_yolo("legacy"));
+
+        let owned = session("vibe-owned", VibeStatus::Idle);
+        legacy
+            .record_with_yolo(&owned, Path::new("/work"), "owned", true)
+            .unwrap();
+        let restarted = MistralVibeOwnership::load(path).unwrap();
+        let source = MistralVibeSource::with_rpc(
+            Arc::new(FakeRpc {
+                sessions: vec![owned],
+                models: Vec::new(),
+            }),
+            restarted,
+        );
+        let session = source
+            .discover(&DiscoveryRequest {
+                include_completed: true,
+                ..DiscoveryRequest::default()
+            })
+            .unwrap()
+            .remove(0);
+        assert!(session.summary.starts_with("⚠ YOLO ·"));
+        assert!(session.raw_state.unwrap().contains("YOLO"));
     }
 
     #[test]
